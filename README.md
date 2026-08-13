@@ -27,10 +27,10 @@ Example:
 ```
 
 ## Build / Run
-Compile on Windows with a C++ toolchain, then run the executable in the same folder as `appsettings.txt`.
+Build with MinGW/ GCC on Windows:
 
 ```bash
-cl main.cpp /EHsc
+g++ main.cpp -o NetworkPinger.exe -liphlpapi -lws2_32
 ```
 
-Or use Visual Studio / MSBuild.
+Then run `NetworkPinger.exe` in the same folder as `appsettings.txt`.

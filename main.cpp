@@ -28,6 +28,7 @@ struct TargetState {
     std::string ip;
     int targetIndex = 0;
     int alertThresholdSec = 30;
+    bool soundEnabled = true;
     std::string status = "WAITING...";
     long lastRtt = 0;
     int consecutiveFails = 0;
@@ -48,7 +49,6 @@ struct Config {
     int timeoutMs = 1000;
     int intervalMs = 1000;
     int defaultThresholdSec = 30;
-    bool soundEnabled = true;
     std::vector<TargetConfig> targets;
 };
 
@@ -56,7 +56,6 @@ std::mutex g_dataMutex;
 std::mutex g_audioMutex;
 std::mutex g_logMutex;
 std::atomic<bool> g_shouldExit{false};
-std::atomic<bool> g_soundEnabled{true};
 std::vector<TargetState> g_targets;
 
 std::string GetCurrentTimeStr();
@@ -112,13 +111,9 @@ Config LoadConfig() {
             std::istringstream first(line);
             int timeout = 0;
             int interval = 0;
-            int soundFlag = 1;
             if (first >> timeout >> interval) {
                 cfg.timeoutMs = timeout;
                 cfg.intervalMs = interval;
-            }
-            if (first >> soundFlag) {
-                cfg.soundEnabled = (soundFlag != 0);
             }
         }
 
@@ -185,8 +180,11 @@ void LogOutageEvent(const std::string& ip, int durationSec, const std::string& s
 }
 
 void PlayAlertSound(int targetIndex) {
-    if (!g_soundEnabled.load()) {
-        return;
+    {
+        std::lock_guard<std::mutex> lock(g_dataMutex);
+        if (!g_targets[targetIndex].soundEnabled) {
+            return;
+        }
     }
 
     std::lock_guard<std::mutex> lock(g_audioMutex);
@@ -209,6 +207,51 @@ void SetColor(WORD color) {
     SetConsoleTextAttribute(hConsole, color);
 }
 
+bool ToggleSoundAtRow(short row, short column) {
+    if (row < 5 || column < 77 || column > 83) {
+        return false;
+    }
+
+    const size_t targetIndex = static_cast<size_t>(row - 5);
+    std::lock_guard<std::mutex> lock(g_dataMutex);
+    if (targetIndex < g_targets.size()) {
+        const bool shouldPlayAlert = !g_targets[targetIndex].soundEnabled &&
+                                     g_targets[targetIndex].status == "OUTAGE!";
+        g_targets[targetIndex].soundEnabled = !g_targets[targetIndex].soundEnabled;
+        return shouldPlayAlert;
+    }
+
+    return false;
+}
+
+void ProcessConsoleInput(HANDLE hInput) {
+    DWORD eventCount = 0;
+    if (!GetNumberOfConsoleInputEvents(hInput, &eventCount) || eventCount == 0) {
+        return;
+    }
+
+    std::vector<INPUT_RECORD> events(eventCount);
+    DWORD eventsRead = 0;
+    if (!ReadConsoleInputA(hInput, events.data(), eventCount, &eventsRead)) {
+        return;
+    }
+
+    for (DWORD i = 0; i < eventsRead; ++i) {
+        const INPUT_RECORD& event = events[i];
+        if (event.EventType == MOUSE_EVENT &&
+            event.Event.MouseEvent.dwEventFlags == 0 &&
+            (event.Event.MouseEvent.dwButtonState & FROM_LEFT_1ST_BUTTON_PRESSED) != 0) {
+            const bool shouldPlayAlert = ToggleSoundAtRow(
+                event.Event.MouseEvent.dwMousePosition.Y,
+                event.Event.MouseEvent.dwMousePosition.X
+            );
+            if (shouldPlayAlert) {
+                PlayAlertSound(static_cast<int>(event.Event.MouseEvent.dwMousePosition.Y - 5));
+            }
+        }
+    }
+}
+
 void RenderDashboard() {
     MoveCursorToTop();
 
@@ -216,8 +259,8 @@ void RenderDashboard() {
     printf("=======================================================================\n");
     printf("                     MULTI-TARGET NETWORK MONITOR                      \n");
     printf("=======================================================================\n");
-    printf(" #  | State | %-20s | Status       | RTT     | Fails | Alert | Last Update\n", "IP Address");
-    printf("----+-------+----------------------+--------------+---------+-------+-------+-----------\n");
+    printf(" #  | State | %-20s | Status       | RTT     | Fails | Alert | Sound | Last Update\n", "IP Address");
+    printf("----+-------+----------------------+--------------+---------+-------+-------+-------+-----------\n");
 
     std::lock_guard<std::mutex> lock(g_dataMutex);
     for (size_t i = 0; i < g_targets.size(); ++i) {
@@ -264,12 +307,16 @@ void RenderDashboard() {
         }
 
         SetColor(COLOR_DEFAULT);
-        printf(" | %-7s | %-5d | %-5d | %s\n", rttStr, t.consecutiveFails, t.alertThresholdSec, t.lastChangeTime.c_str());
+        printf(" | %-7s | %-5d | %-5d | ", rttStr, t.consecutiveFails, t.alertThresholdSec);
+        SetColor(t.soundEnabled ? COLOR_GREEN : COLOR_RED);
+        printf(t.soundEnabled ? "[ON ]" : "[OFF]");
+        SetColor(COLOR_DEFAULT);
+        printf(" | %s\n", t.lastChangeTime.c_str());
     }
 
     SetColor(COLOR_DEFAULT);
     printf("=======================================================================\n");
-    printf(" Press Ctrl+C to stop monitor.\n");
+    printf(" Click [ON ]/[OFF] for sound, or press Ctrl+C to stop monitor.\n");
 }
 
 void PingWorker(size_t index, int timeoutMs, int intervalMs) {
@@ -380,6 +427,16 @@ int main() {
     SetConsoleOutputCP(CP_UTF8);
 
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    HANDLE hInput = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD originalInputMode = 0;
+    GetConsoleMode(hInput, &originalInputMode);
+    SetConsoleMode(
+        hInput,
+        (originalInputMode & ~ENABLE_QUICK_EDIT_MODE) |
+        ENABLE_EXTENDED_FLAGS |
+        ENABLE_MOUSE_INPUT
+    );
+
     CONSOLE_CURSOR_INFO cursorInfo;
     GetConsoleCursorInfo(hConsole, &cursorInfo);
     cursorInfo.bVisible = FALSE;
@@ -388,8 +445,6 @@ int main() {
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
     Config cfg = LoadConfig();
-    g_soundEnabled.store(cfg.soundEnabled);
-
     for (size_t i = 0; i < cfg.targets.size(); ++i) {
         TargetState st;
         st.ip = cfg.targets[i].ip;
@@ -404,6 +459,7 @@ int main() {
     }
 
     while (!g_shouldExit) {
+        ProcessConsoleInput(hInput);
         RenderDashboard();
         Sleep(250);
     }
@@ -415,6 +471,8 @@ int main() {
             th.join();
         }
     }
+
+    SetConsoleMode(hInput, originalInputMode);
 
     return 0;
 }

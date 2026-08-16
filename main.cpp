@@ -26,6 +26,7 @@
 
 struct TargetState {
     std::string ip;
+    std::string alias;
     int targetIndex = 0;
     int alertThresholdSec = 30;
     bool soundEnabled = true;
@@ -42,6 +43,7 @@ struct TargetState {
 
 struct TargetConfig {
     std::string ip;
+    std::string alias;
     int alertThresholdSec = 30;
 };
 
@@ -60,10 +62,12 @@ std::vector<TargetState> g_targets;
 
 std::string GetCurrentTimeStr();
 std::string GetCurrentDateTimeStr();
-void LogOutageEvent(const std::string& ip, int durationSec, const std::string& startTimeStr, const std::string& endTimeStr);
+std::string FormatDuration(int durationSec);
+std::string FormatTargetName(const std::string& ip, const std::string& alias);
+void LogOutageEvent(const std::string& ip, const std::string& alias, int durationSec, const std::string& startTimeStr, const std::string& endTimeStr);
 
 void FlushActiveOutages() {
-    std::vector<std::tuple<std::string, int, std::string, std::string>> entries;
+    std::vector<std::tuple<std::string, std::string, int, std::string, std::string>> entries;
 
     {
         std::lock_guard<std::mutex> lock(g_dataMutex);
@@ -75,14 +79,14 @@ void FlushActiveOutages() {
             int durationSec = (int)std::chrono::duration_cast<std::chrono::seconds>(now - t.outageStartTime).count();
             if (durationSec < 0) durationSec = 0;
 
-            entries.emplace_back(t.ip, durationSec, t.outageStartTimeStr, GetCurrentTimeStr());
+            entries.emplace_back(t.ip, t.alias, durationSec, t.outageStartTimeStr, GetCurrentTimeStr());
             t.isOutageLogged = false;
             t.status = "OFFLINE";
         }
     }
 
     for (const auto& e : entries) {
-        LogOutageEvent(std::get<0>(e), std::get<1>(e), std::get<2>(e), std::get<3>(e));
+        LogOutageEvent(std::get<0>(e), std::get<1>(e), std::get<2>(e), std::get<3>(e), std::get<4>(e));
     }
 }
 
@@ -123,11 +127,14 @@ Config LoadConfig() {
             std::istringstream iss(line);
             std::string ip;
             int threshold = cfg.defaultThresholdSec;
+            std::string alias;
 
             if (iss >> ip >> threshold) {
                 if (ip.find('.') != std::string::npos || ip.find(':') != std::string::npos) {
+                    std::getline(iss >> std::ws, alias);
                     TargetConfig target;
                     target.ip = ip;
+                    target.alias = alias;
                     target.alertThresholdSec = std::max(1, threshold);
                     cfg.targets.push_back(target);
                 }
@@ -167,13 +174,30 @@ std::string GetCurrentDateTimeStr() {
     return ss.str();
 }
 
+std::string FormatDuration(int durationSec) {
+    durationSec = std::max(0, durationSec);
+    const int hours = durationSec / 3600;
+    const int minutes = (durationSec % 3600) / 60;
+    const int seconds = durationSec % 60;
+
+    std::ostringstream duration;
+    if (hours > 0) duration << hours << "г. ";
+    if (hours > 0 || minutes > 0) duration << minutes << "хв. ";
+    duration << seconds << "сек.";
+    return duration.str();
+}
+
+std::string FormatTargetName(const std::string& ip, const std::string& alias) {
+    return alias.empty() ? ip : alias + " (" + ip + ")";
+}
+
 // Запис у ЄДИНИЙ чистий лог-файл
-void LogOutageEvent(const std::string& ip, int durationSec, const std::string& startTimeStr, const std::string& endTimeStr) {
+void LogOutageEvent(const std::string& ip, const std::string& alias, int durationSec, const std::string& startTimeStr, const std::string& endTimeStr) {
     std::lock_guard<std::mutex> lock(g_logMutex);
     std::ofstream logFile("network_outages.log", std::ios::app);
     if (logFile.is_open()) {
         logFile << "[" << GetCurrentDateTimeStr() << "] " 
-                << ip << " - був відсутній зв'язок " << durationSec << " сек "
+                << FormatTargetName(ip, alias) << " - був відсутній зв'язок " << FormatDuration(durationSec) << " "
                 << "(з " << startTimeStr << " до " << endTimeStr << ")" << std::endl;
         logFile.flush();
     }
@@ -208,7 +232,7 @@ void SetColor(WORD color) {
 }
 
 bool ToggleSoundAtRow(short row, short column) {
-    if (row < 5 || column < 77 || column > 83) {
+    if (row < 5 || column < 101 || column > 104) {
         return false;
     }
 
@@ -259,12 +283,13 @@ void RenderDashboard() {
     printf("=======================================================================\n");
     printf("                     MULTI-TARGET NETWORK MONITOR                      \n");
     printf("=======================================================================\n");
-    printf(" #  | State | %-20s | Status       | RTT     | Fails | Alert | Sound | Last Update\n", "IP Address");
-    printf("----+-------+----------------------+--------------+---------+-------+-------+-------+-----------\n");
+    printf(" #  | State | %-20s | %-20s | Status       | RTT     | Fails | Alert | Sound | Last Update\n", "IP Address", "Alias");
+    printf("----+-------+----------------------+----------------------+--------------+---------+-------+-------+-------+-----------\n");
 
     std::lock_guard<std::mutex> lock(g_dataMutex);
     for (size_t i = 0; i < g_targets.size(); ++i) {
         const auto& t = g_targets[i];
+        const std::string alias = t.alias.empty() ? "-" : t.alias;
         
         char rttStr[16];
         if (t.lastRtt >= 0) {
@@ -280,7 +305,7 @@ void RenderDashboard() {
             SetColor(COLOR_GREEN);
             printf("[O]");
             SetColor(COLOR_DEFAULT);
-            printf("  | %-20s | ", t.ip.c_str());
+            printf("  | %-20s | %-20s | ", t.ip.c_str(), alias.c_str());
             SetColor(COLOR_GREEN);
             printf("%-12s", t.status.c_str());
         } 
@@ -288,7 +313,7 @@ void RenderDashboard() {
             SetColor(COLOR_RED);
             printf("[O]");
             SetColor(COLOR_DEFAULT);
-            printf("  | %-20s | ", t.ip.c_str());
+            printf("  | %-20s | %-20s | ", t.ip.c_str(), alias.c_str());
             SetColor(COLOR_RED);
             printf("%-12s", t.status.c_str());
         } 
@@ -296,14 +321,14 @@ void RenderDashboard() {
             SetColor(COLOR_YELLOW);
             printf("[O]");
             SetColor(COLOR_DEFAULT);
-            printf("  | %-20s | ", t.ip.c_str());
+            printf("  | %-20s | %-20s | ", t.ip.c_str(), alias.c_str());
             SetColor(COLOR_YELLOW);
             printf("%-12s", t.status.c_str());
         } 
         else {
             SetColor(COLOR_DEFAULT);
             printf("[?]");
-            printf("  | %-20s | %-12s", t.ip.c_str(), t.status.c_str());
+            printf("  | %-20s | %-20s | %-12s", t.ip.c_str(), alias.c_str(), t.status.c_str());
         }
 
         SetColor(COLOR_DEFAULT);
@@ -363,6 +388,7 @@ void PingWorker(size_t index, int timeoutMs, int intervalMs) {
 
             if (isSuccess) {
                 std::string outageIp;
+                std::string outageAlias;
                 int outageDurationSec = 0;
                 std::string outageStartTimeStr;
 
@@ -370,6 +396,7 @@ void PingWorker(size_t index, int timeoutMs, int intervalMs) {
                     auto now = std::chrono::system_clock::now();
                     outageDurationSec = (int)std::chrono::duration_cast<std::chrono::seconds>(now - t.outageStartTime).count();
                     outageIp = t.ip;
+                    outageAlias = t.alias;
                     outageStartTimeStr = t.outageStartTimeStr;
                     t.isOutageLogged = false;
                 }
@@ -384,7 +411,7 @@ void PingWorker(size_t index, int timeoutMs, int intervalMs) {
                     std::ofstream logFile("network_outages.log", std::ios::app);
                     if (logFile.is_open()) {
                         logFile << "[" << GetCurrentDateTimeStr() << "] "
-                                << outageIp << " - був відсутній зв'язок " << outageDurationSec << " сек "
+                                << FormatTargetName(outageIp, outageAlias) << " - був відсутній зв'язок " << FormatDuration(outageDurationSec) << " "
                                 << "(з " << outageStartTimeStr << " до " << endTimeStr << ")" << std::endl;
                         logFile.flush();
                     }
@@ -448,6 +475,7 @@ int main() {
     for (size_t i = 0; i < cfg.targets.size(); ++i) {
         TargetState st;
         st.ip = cfg.targets[i].ip;
+        st.alias = cfg.targets[i].alias;
         st.targetIndex = (int)i;
         st.alertThresholdSec = cfg.targets[i].alertThresholdSec;
         g_targets.push_back(st);

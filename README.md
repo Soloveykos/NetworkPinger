@@ -14,35 +14,38 @@ Small Windows console monitor that pings multiple IPs and shows their live conne
 
 ```txt
 <timeoutMs> <intervalMs>
-<ip1> <alertSeconds>
-<ip2> <alertSeconds>
-<ip3> <alertSeconds>
+<ip1> <alertSeconds> [alias]
+<ip2> <alertSeconds> [alias]
+<ip3> <alertSeconds> [alias]
 ```
 
 Meaning:
 - `timeoutMs` — ping timeout in milliseconds
 - `intervalMs` — delay between checks in milliseconds
-- each next line is `IP thresholdSeconds`
+- each next line is `IP thresholdSeconds [alias]`; the optional alias may contain spaces
 
 Example:
 
 ```txt
 1000 1000
-8.8.8.8 3
-1.1.1.1 60
-9.9.9.9 30
+8.8.8.8 3 Google DNS
+1.1.1.1 60 Cloudflare DNS
+9.9.9.9 30 Quad9 DNS
 ```
 
-Each IP can have its own outage threshold and sound state. If the ping fails repeatedly for longer than that value, the app marks it as outage and triggers the alert once. Click the green `[ON ]` or red `[OFF]` value in the `Sound` column to toggle sound for that IP.
+Each IP can have its own outage threshold, alias, and sound state. If the ping fails repeatedly for longer than that value, the app marks it as outage and triggers the alert once. Outage logs use a readable duration such as `1г. 2хв. 3сек.`. Click the green `[ON ]` or red `[OFF]` value in the `Sound` column to toggle sound for that IP.
 
 ## Build / Run
 Build with W64DevKit on Windows. In PowerShell, run:
 
 ```bash
 $env:PATH = "C:\w64devkit\bin;" + $env:PATH
-C:\w64devkit\bin\g++.exe main.cpp -o NetworkPinger.exe -liphlpapi -lws2_32
+C:\w64devkit\bin\windres.exe NetworkPinger.rc -O coff -o NetworkPinger-resources.o
+C:\w64devkit\bin\g++.exe main.cpp NetworkPinger-resources.o -o NetworkPinger.exe -liphlpapi -lws2_32
 ```
 
 The `PATH` update is needed so the compiler can find its assembler and other build tools.
+
+`NetworkPinger.ico` is embedded into `NetworkPinger.exe` during this build. To adjust the green digital-rain icon, edit and run `tools\create-icon.ps1` before rebuilding.
 
 Then run `NetworkPinger.exe` in the same folder as `appsettings.txt`.

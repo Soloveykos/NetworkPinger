@@ -27,7 +27,8 @@
 #define COLOR_GREEN_DIM FOREGROUND_GREEN
 #define COLOR_RED_DIM   FOREGROUND_RED
 
-constexpr wchar_t kMatrixGlyphs[] = L"ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝｰ･ﾞﾟ";
+constexpr wchar_t kMatrixGlyphs[] = L"ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ";
+constexpr int kDashboardWidth = 107;
 
 struct TargetState {
     std::string ip;
@@ -73,6 +74,18 @@ std::string GetCurrentDateTimeStr();
 std::string FormatDuration(int durationSec);
 std::string FormatTargetName(const std::string& ip, const std::string& alias);
 void LogOutageEvent(const std::string& ip, const std::string& alias, int durationSec, const std::string& startTimeStr, const std::string& endTimeStr);
+
+WORD GetMatrixColor(const TargetState& target, bool bright) {
+    if (target.status == "DROPPING...") {
+        return COLOR_YELLOW;
+    }
+
+    if (target.lastPingSucceeded) {
+        return bright ? COLOR_GREEN : COLOR_GREEN_DIM;
+    }
+
+    return bright ? COLOR_RED : COLOR_RED_DIM;
+}
 
 void FlushActiveOutages() {
     std::vector<std::tuple<std::string, std::string, int, std::string, std::string>> entries;
@@ -238,6 +251,33 @@ void MoveCursorToTop() {
     SetConsoleCursorPosition(hConsole, coord);
 }
 
+bool ClearConsoleAfterResize() {
+    static short previousWidth = 0;
+    static short previousHeight = 0;
+
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    CONSOLE_SCREEN_BUFFER_INFO consoleInfo;
+    if (!GetConsoleScreenBufferInfo(hConsole, &consoleInfo)) {
+        return false;
+    }
+
+    const short width = consoleInfo.srWindow.Right - consoleInfo.srWindow.Left + 1;
+    const short height = consoleInfo.srWindow.Bottom - consoleInfo.srWindow.Top + 1;
+    if (width == previousWidth && height == previousHeight) {
+        return false;
+    }
+
+    previousWidth = width;
+    previousHeight = height;
+
+    const DWORD cellCount = static_cast<DWORD>(consoleInfo.dwSize.X) * consoleInfo.dwSize.Y;
+    const COORD origin = { 0, 0 };
+    DWORD cellsWritten = 0;
+    FillConsoleOutputCharacterW(hConsole, L' ', cellCount, origin, &cellsWritten);
+    FillConsoleOutputAttribute(hConsole, COLOR_DEFAULT, cellCount, origin, &cellsWritten);
+    return true;
+}
+
 void SetColor(WORD color) {
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
     SetConsoleTextAttribute(hConsole, color);
@@ -302,26 +342,40 @@ void ProcessConsoleInput(HANDLE hInput) {
 
 void RenderDashboard() {
     static unsigned int matrixFrame = 0;
-    MoveCursorToTop();
+    static auto lastMatrixStep = std::chrono::steady_clock::time_point{};
+    static auto lastTableRender = std::chrono::steady_clock::time_point{};
+    const auto now = std::chrono::steady_clock::now();
+    if (now - lastMatrixStep >= std::chrono::milliseconds(150)) {
+        ++matrixFrame;
+        lastMatrixStep = now;
+    }
+    const bool wasResized = ClearConsoleAfterResize();
+    const bool shouldRenderTable = !g_matrixEnabled ||
+        wasResized ||
+        now - lastTableRender >= std::chrono::milliseconds(250);
 
-    SetColor(COLOR_DEFAULT);
-    printf("=======================================================================\n");
-    printf("                     MULTI-TARGET NETWORK MONITOR                      \n");
-    printf("=======================================================================\n");
-    printf(" #  | State | %-20s | %-20s | Status       | RTT     | Fails | Alert | Sound | Last Update\n", "IP Address", "Alias");
-    printf("----+-------+----------------------+----------------------+--------------+---------+-------+-------+-------+-----------\n");
+    if (shouldRenderTable) {
+        lastTableRender = now;
+        MoveCursorToTop();
 
-    std::lock_guard<std::mutex> lock(g_dataMutex);
-    for (size_t i = 0; i < g_targets.size(); ++i) {
-        const auto& t = g_targets[i];
-        const std::string alias = t.alias.empty() ? "-" : t.alias;
+        SetColor(COLOR_DEFAULT);
+        printf("=======================================================================\n");
+        printf("                     MULTI-TARGET NETWORK MONITOR                      \n");
+        printf("=======================================================================\n");
+        printf(" #  | State | %-20s | %-20s | Status       | RTT     | Fails | Alert | Sound | Last Update\n", "IP Address", "Alias");
+        printf("----+-------+----------------------+----------------------+--------------+---------+-------+-------+-------+-----------\n");
         
-        char rttStr[16];
-        if (t.lastRtt >= 0) {
-            snprintf(rttStr, sizeof(rttStr), "%ld ms", t.lastRtt);
-        } else {
-            snprintf(rttStr, sizeof(rttStr), "N/A");
-        }
+        std::lock_guard<std::mutex> lock(g_dataMutex);
+        for (size_t i = 0; i < g_targets.size(); ++i) {
+            const auto& t = g_targets[i];
+            const std::string alias = t.alias.empty() ? "-" : t.alias;
+            
+            char rttStr[16];
+            if (t.lastRtt >= 0) {
+                snprintf(rttStr, sizeof(rttStr), "%ld ms", t.lastRtt);
+            } else {
+                snprintf(rttStr, sizeof(rttStr), "N/A");
+            }
 
         SetColor(COLOR_DEFAULT);
         printf(" %-2zu |  ", i + 1);
@@ -361,16 +415,19 @@ void RenderDashboard() {
         SetColor(t.soundEnabled ? COLOR_GREEN : COLOR_RED);
         printf(t.soundEnabled ? "[ON ]" : "[OFF]");
         SetColor(COLOR_DEFAULT);
-        printf(" | %s\n", t.lastChangeTime.c_str());
-    }
+            printf(" | %s\n", t.lastChangeTime.c_str());
+        }
 
-    SetColor(COLOR_DEFAULT);
-    printf("=======================================================================\n");
-    printf(" Click [ON ]/[OFF] for sound, or press Ctrl+C to stop monitor.\n");
+        SetColor(COLOR_DEFAULT);
+        printf("=======================================================================\n");
+        printf(" Click [ON ]/[OFF] for sound, or press Ctrl+C to stop monitor.\n");
+    }
 
     if (!g_matrixEnabled) {
         return;
     }
+
+    std::lock_guard<std::mutex> lock(g_dataMutex);
 
     CONSOLE_SCREEN_BUFFER_INFO consoleInfo;
     int consoleWidth = 120;
@@ -380,9 +437,10 @@ void RenderDashboard() {
         consoleHeight = consoleInfo.srWindow.Bottom - consoleInfo.srWindow.Top + 1;
     }
 
+    const int matrixWidth = std::min(consoleWidth, kDashboardWidth);
     const int tableHeight = static_cast<int>(g_targets.size()) + 7;
     const int matrixHeight = std::max(1, consoleHeight - tableHeight);
-    const int laneWidth = std::max(1, consoleWidth / static_cast<int>(g_targets.size()));
+    const int laneWidth = std::max(1, matrixWidth / static_cast<int>(g_targets.size()));
     const size_t glyphCount = std::wcslen(kMatrixGlyphs);
     std::vector<CHAR_INFO> matrixBuffer(static_cast<size_t>(consoleWidth) * matrixHeight);
 
@@ -395,22 +453,22 @@ void RenderDashboard() {
         const auto& target = g_targets[i];
         const std::wstring label = Utf8ToWide(target.alias.empty() ? target.ip : target.alias);
         const int labelStart = static_cast<int>(i) * laneWidth;
-        const int labelLength = std::min({ static_cast<int>(label.size()), laneWidth, consoleWidth - labelStart });
+        const int labelLength = std::min({ static_cast<int>(label.size()), laneWidth, matrixWidth - labelStart });
         for (int character = 0; character < labelLength; ++character) {
             CHAR_INFO& cell = matrixBuffer[labelStart + character];
             cell.Char.UnicodeChar = label[character];
-            cell.Attributes = target.lastPingSucceeded ? COLOR_GREEN : COLOR_RED;
+            cell.Attributes = GetMatrixColor(target, true);
         }
     }
 
     for (int row = 1; row < matrixHeight; ++row) {
         for (size_t i = 0; i < g_targets.size(); ++i) {
             const auto& target = g_targets[i];
-            const int column = std::min(consoleWidth - 1, static_cast<int>(i) * laneWidth + laneWidth / 2);
+            const int column = std::min(matrixWidth - 1, static_cast<int>(i) * laneWidth + laneWidth / 2);
             const size_t glyphIndex = (matrixFrame + glyphCount - ((row - 1) % glyphCount) + i * 7) % glyphCount;
             CHAR_INFO& cell = matrixBuffer[static_cast<size_t>(row) * consoleWidth + column];
             cell.Char.UnicodeChar = kMatrixGlyphs[glyphIndex];
-            cell.Attributes = target.lastPingSucceeded ? COLOR_GREEN_DIM : COLOR_RED_DIM;
+            cell.Attributes = GetMatrixColor(target, true);
         }
     }
 
@@ -425,7 +483,6 @@ void RenderDashboard() {
     };
     WriteConsoleOutputW(hConsole, matrixBuffer.data(), bufferSize, bufferOrigin, &matrixRect);
 
-    ++matrixFrame;
 }
 
 void PingWorker(size_t index, int timeoutMs, int intervalMs) {
@@ -581,7 +638,7 @@ int main() {
     while (!g_shouldExit) {
         ProcessConsoleInput(hInput);
         RenderDashboard();
-        Sleep(250);
+        Sleep(50);
     }
 
     FlushActiveOutages();

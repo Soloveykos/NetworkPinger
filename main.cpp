@@ -341,14 +341,8 @@ void ProcessConsoleInput(HANDLE hInput) {
 }
 
 void RenderDashboard() {
-    static unsigned int matrixFrame = 0;
-    static auto lastMatrixStep = std::chrono::steady_clock::time_point{};
     static auto lastTableRender = std::chrono::steady_clock::time_point{};
     const auto now = std::chrono::steady_clock::now();
-    if (now - lastMatrixStep >= std::chrono::milliseconds(150)) {
-        ++matrixFrame;
-        lastMatrixStep = now;
-    }
     const bool wasResized = ClearConsoleAfterResize();
     const bool shouldRenderTable = !g_matrixEnabled ||
         wasResized ||
@@ -440,48 +434,133 @@ void RenderDashboard() {
     const int matrixWidth = std::min(consoleWidth, kDashboardWidth);
     const int tableHeight = static_cast<int>(g_targets.size()) + 7;
     const int matrixHeight = std::max(1, consoleHeight - tableHeight);
+    const int glyphRows = matrixHeight - 1;
+    const int maxRainLength = std::max(5, std::min(18, glyphRows / 2));
     const int laneWidth = std::max(1, matrixWidth / static_cast<int>(g_targets.size()));
     const size_t glyphCount = std::wcslen(kMatrixGlyphs);
-    std::vector<CHAR_INFO> matrixBuffer(static_cast<size_t>(consoleWidth) * matrixHeight);
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
 
-    for (auto& cell : matrixBuffer) {
-        cell.Char.UnicodeChar = L' ';
-        cell.Attributes = COLOR_DEFAULT;
+    struct RainStream {
+        int headRow;
+        int length;
+        int cadence;
+        int phase;
+    };
+    static int renderedWidth = 0;
+    static int renderedHeight = 0;
+    static std::vector<WORD> renderedColors;
+    static std::vector<RainStream> rainStreams;
+    static unsigned int rainTick = 0;
+    static auto lastMatrixStep = std::chrono::steady_clock::time_point{};
+    static unsigned int randomState = 0x9E3779B9u;
+
+    std::vector<WORD> targetColors;
+    for (const auto& target : g_targets) {
+        targetColors.push_back(GetMatrixColor(target, false));
     }
 
-    for (size_t i = 0; i < g_targets.size(); ++i) {
-        const auto& target = g_targets[i];
-        const std::wstring label = Utf8ToWide(target.alias.empty() ? target.ip : target.alias);
-        const int labelStart = static_cast<int>(i) * laneWidth;
-        const int labelLength = std::min({ static_cast<int>(label.size()), laneWidth, matrixWidth - labelStart });
-        for (int character = 0; character < labelLength; ++character) {
-            CHAR_INFO& cell = matrixBuffer[labelStart + character];
-            cell.Char.UnicodeChar = label[character];
-            cell.Attributes = GetMatrixColor(target, true);
+    const bool needsFullRender = renderedWidth != consoleWidth ||
+        renderedHeight != matrixHeight ||
+        renderedColors != targetColors;
+
+    if (needsFullRender) {
+        std::vector<CHAR_INFO> matrixBuffer(static_cast<size_t>(consoleWidth) * matrixHeight);
+        for (auto& cell : matrixBuffer) {
+            cell.Char.UnicodeChar = L' ';
+            cell.Attributes = COLOR_DEFAULT;
         }
-    }
 
-    for (int row = 1; row < matrixHeight; ++row) {
         for (size_t i = 0; i < g_targets.size(); ++i) {
             const auto& target = g_targets[i];
-            const int column = std::min(matrixWidth - 1, static_cast<int>(i) * laneWidth + laneWidth / 2);
-            const size_t glyphIndex = (matrixFrame + glyphCount - ((row - 1) % glyphCount) + i * 7) % glyphCount;
-            CHAR_INFO& cell = matrixBuffer[static_cast<size_t>(row) * consoleWidth + column];
-            cell.Char.UnicodeChar = kMatrixGlyphs[glyphIndex];
-            cell.Attributes = GetMatrixColor(target, true);
+            const std::wstring label = Utf8ToWide(target.alias.empty() ? target.ip : target.alias);
+            const int labelStart = static_cast<int>(i) * laneWidth;
+            const int labelLength = std::min({ static_cast<int>(label.size()), laneWidth, matrixWidth - labelStart });
+            for (int character = 0; character < labelLength; ++character) {
+                CHAR_INFO& cell = matrixBuffer[labelStart + character];
+                cell.Char.UnicodeChar = label[character];
+                cell.Attributes = GetMatrixColor(target, true);
+            }
+        }
+
+        COORD bufferSize = { static_cast<SHORT>(consoleWidth), static_cast<SHORT>(matrixHeight) };
+        COORD bufferOrigin = { 0, 0 };
+        SMALL_RECT matrixRect = { 0, static_cast<SHORT>(tableHeight), static_cast<SHORT>(consoleWidth - 1), static_cast<SHORT>(consoleHeight - 1) };
+        WriteConsoleOutputW(hConsole, matrixBuffer.data(), bufferSize, bufferOrigin, &matrixRect);
+
+        renderedWidth = consoleWidth;
+        renderedHeight = matrixHeight;
+        renderedColors = targetColors;
+        rainStreams.clear();
+        for (int column = 0; column < matrixWidth; ++column) {
+            const int length = 4 + (randomState % std::max(1, maxRainLength - 3));
+            randomState = randomState * 1664525u + 1013904223u;
+            const int startRow = -static_cast<int>(randomState % std::max(1, glyphRows + length));
+            rainStreams.push_back({ startRow, length, 2 + static_cast<int>(randomState % 4), static_cast<int>(randomState % 5) });
+            randomState = randomState * 1664525u + 1013904223u;
+        }
+        rainTick = 0;
+        lastMatrixStep = now;
+        return;
+    }
+
+    if (now - lastMatrixStep < std::chrono::milliseconds(100)) {
+        return;
+    }
+
+    if (glyphRows < 1) {
+        return;
+    }
+
+    const auto nextRandom = []() {
+        randomState ^= randomState << 13;
+        randomState ^= randomState >> 17;
+        randomState ^= randomState << 5;
+        return randomState;
+    };
+
+    const auto writeCell = [&](int column, int glyphRow, wchar_t glyph, WORD color) {
+        if (glyphRow < 0 || glyphRow >= glyphRows) {
+            return;
+        }
+
+        CHAR_INFO cell = {};
+        cell.Char.UnicodeChar = glyph;
+        cell.Attributes = color;
+        COORD updateSize = { 1, 1 };
+        COORD updateOrigin = { 0, 0 };
+        SMALL_RECT updateRect = { static_cast<SHORT>(column), static_cast<SHORT>(tableHeight + glyphRow + 1), static_cast<SHORT>(column), static_cast<SHORT>(tableHeight + glyphRow + 1) };
+        WriteConsoleOutputW(hConsole, &cell, updateSize, updateOrigin, &updateRect);
+    };
+
+    ++rainTick;
+    for (int column = 0; column < matrixWidth; ++column) {
+        RainStream& stream = rainStreams[column];
+        if ((rainTick + stream.phase) % stream.cadence != 0) {
+            continue;
+        }
+
+        const size_t targetIndex = std::min(g_targets.size() - 1, static_cast<size_t>(column / laneWidth));
+        const int tailRow = stream.headRow - stream.length;
+        writeCell(column, tailRow, L' ', COLOR_DEFAULT);
+        writeCell(column, stream.headRow, kMatrixGlyphs[nextRandom() % glyphCount], targetColors[targetIndex]);
+
+        ++stream.headRow;
+        writeCell(
+            column,
+            stream.headRow,
+            kMatrixGlyphs[nextRandom() % glyphCount],
+            FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY
+        );
+
+        if (stream.headRow - stream.length >= glyphRows) {
+            stream.length = 4 + static_cast<int>(nextRandom() % std::max(1, maxRainLength - 3));
+            stream.cadence = 2 + static_cast<int>(nextRandom() % 4);
+            stream.phase = static_cast<int>(nextRandom() % stream.cadence);
+            stream.headRow = -static_cast<int>(nextRandom() % std::max(1, glyphRows / 2));
         }
     }
 
-    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
-    COORD bufferSize = { static_cast<SHORT>(consoleWidth), static_cast<SHORT>(matrixHeight) };
-    COORD bufferOrigin = { 0, 0 };
-    SMALL_RECT matrixRect = {
-        0,
-        static_cast<SHORT>(tableHeight),
-        static_cast<SHORT>(consoleWidth - 1),
-        static_cast<SHORT>(consoleHeight - 1)
-    };
-    WriteConsoleOutputW(hConsole, matrixBuffer.data(), bufferSize, bufferOrigin, &matrixRect);
+    lastMatrixStep = now;
 
 }
 

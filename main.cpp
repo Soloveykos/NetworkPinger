@@ -11,6 +11,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <cwchar>
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -26,13 +27,7 @@
 #define COLOR_GREEN_DIM FOREGROUND_GREEN
 #define COLOR_RED_DIM   FOREGROUND_RED
 
-constexpr const char* kMatrixGlyphs[] = {
-    "ｱ", "ｲ", "ｳ", "ｴ", "ｵ", "ｶ", "ｷ", "ｸ", "ｹ", "ｺ",
-    "ｻ", "ｼ", "ｽ", "ｾ", "ｿ", "ﾀ", "ﾁ", "ﾂ", "ﾃ", "ﾄ",
-    "ﾅ", "ﾆ", "ﾇ", "ﾈ", "ﾉ", "ﾊ", "ﾋ", "ﾌ", "ﾍ", "ﾎ",
-    "ﾏ", "ﾐ", "ﾑ", "ﾒ", "ﾓ", "ﾔ", "ﾕ", "ﾖ", "ﾗ", "ﾘ",
-    "ﾙ", "ﾚ", "ﾛ", "ﾜ", "ﾝ", "ｰ", "･", "ﾞ", "ﾟ"
-};
+constexpr wchar_t kMatrixGlyphs[] = L"ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝｰ･ﾞﾟ";
 
 struct TargetState {
     std::string ip;
@@ -248,6 +243,18 @@ void SetColor(WORD color) {
     SetConsoleTextAttribute(hConsole, color);
 }
 
+std::wstring Utf8ToWide(const std::string& text) {
+    if (text.empty()) {
+        return L"";
+    }
+
+    const int length = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+    std::wstring wideText(length, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, wideText.data(), length);
+    wideText.pop_back();
+    return wideText;
+}
+
 bool ToggleSoundAtRow(short row, short column) {
     if (row < 5 || column < 101 || column > 104) {
         return false;
@@ -373,32 +380,50 @@ void RenderDashboard() {
         consoleHeight = consoleInfo.srWindow.Bottom - consoleInfo.srWindow.Top + 1;
     }
 
-    const int laneWidth = std::max(1, consoleWidth / static_cast<int>(g_targets.size()));
     const int tableHeight = static_cast<int>(g_targets.size()) + 7;
-    const int matrixHeight = std::max(1, consoleHeight - tableHeight - 2);
+    const int matrixHeight = std::max(1, consoleHeight - tableHeight);
+    const int laneWidth = std::max(1, consoleWidth / static_cast<int>(g_targets.size()));
+    const size_t glyphCount = std::wcslen(kMatrixGlyphs);
+    std::vector<CHAR_INFO> matrixBuffer(static_cast<size_t>(consoleWidth) * matrixHeight);
+
+    for (auto& cell : matrixBuffer) {
+        cell.Char.UnicodeChar = L' ';
+        cell.Attributes = COLOR_DEFAULT;
+    }
+
     for (size_t i = 0; i < g_targets.size(); ++i) {
         const auto& target = g_targets[i];
-        const std::string label = target.alias.empty() ? target.ip : target.alias;
-        printf("%-*.*s", laneWidth, laneWidth, label.c_str());
+        const std::wstring label = Utf8ToWide(target.alias.empty() ? target.ip : target.alias);
+        const int labelStart = static_cast<int>(i) * laneWidth;
+        const int labelLength = std::min({ static_cast<int>(label.size()), laneWidth, consoleWidth - labelStart });
+        for (int character = 0; character < labelLength; ++character) {
+            CHAR_INFO& cell = matrixBuffer[labelStart + character];
+            cell.Char.UnicodeChar = label[character];
+            cell.Attributes = target.lastPingSucceeded ? COLOR_GREEN : COLOR_RED;
+        }
     }
-    printf("\n");
 
-    for (int row = 0; row < matrixHeight; ++row) {
+    for (int row = 1; row < matrixHeight; ++row) {
         for (size_t i = 0; i < g_targets.size(); ++i) {
             const auto& target = g_targets[i];
-            const WORD color = target.lastPingSucceeded
-                ? COLOR_GREEN_DIM
-                : COLOR_RED_DIM;
-            const size_t glyphIndex = (matrixFrame + row + i * 7) % (sizeof(kMatrixGlyphs) / sizeof(kMatrixGlyphs[0]));
-
-            printf("%*s", laneWidth / 2, "");
-            SetColor(color);
-            printf("%s", kMatrixGlyphs[glyphIndex]);
-            SetColor(COLOR_DEFAULT);
-            printf("%*s", laneWidth - laneWidth / 2 - 1, "");
+            const int column = std::min(consoleWidth - 1, static_cast<int>(i) * laneWidth + laneWidth / 2);
+            const size_t glyphIndex = (matrixFrame + glyphCount - ((row - 1) % glyphCount) + i * 7) % glyphCount;
+            CHAR_INFO& cell = matrixBuffer[static_cast<size_t>(row) * consoleWidth + column];
+            cell.Char.UnicodeChar = kMatrixGlyphs[glyphIndex];
+            cell.Attributes = target.lastPingSucceeded ? COLOR_GREEN_DIM : COLOR_RED_DIM;
         }
-        printf("\n");
     }
+
+    HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
+    COORD bufferSize = { static_cast<SHORT>(consoleWidth), static_cast<SHORT>(matrixHeight) };
+    COORD bufferOrigin = { 0, 0 };
+    SMALL_RECT matrixRect = {
+        0,
+        static_cast<SHORT>(tableHeight),
+        static_cast<SHORT>(consoleWidth - 1),
+        static_cast<SHORT>(consoleHeight - 1)
+    };
+    WriteConsoleOutputW(hConsole, matrixBuffer.data(), bufferSize, bufferOrigin, &matrixRect);
 
     ++matrixFrame;
 }

@@ -420,14 +420,20 @@ void PingWorker(size_t index, int timeoutMs, int intervalMs) {
                 t.consecutiveFails++;
                 t.lastRtt = -1;
 
+                const auto now = std::chrono::system_clock::now();
+
                 // Фіксуємо точний час початку першого фейлу
                 if (t.consecutiveFails == 1) {
-                    t.outageStartTime = std::chrono::system_clock::now();
+                    t.outageStartTime = now;
                     t.outageStartTimeStr = timeNow;
                 }
 
-                // Перевищено індивідуальний поріг для поточного IP
-                if (t.consecutiveFails >= t.alertThresholdSec) {
+                const int outageDurationSec = static_cast<int>(
+                    std::chrono::duration_cast<std::chrono::seconds>(now - t.outageStartTime).count()
+                );
+
+                // Перевищено індивідуальний поріг тривалості недоступності для поточного IP
+                if (outageDurationSec >= t.alertThresholdSec) {
                     t.status = "OUTAGE!";
                     t.isOutageLogged = true; // Позначаємо, що після відновлення потрібно записати підсумок у лог
                     triggerSound = true;

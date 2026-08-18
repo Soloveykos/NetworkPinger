@@ -14,7 +14,7 @@ Small Windows console monitor that pings multiple IPs and shows their live conne
 `appsettings.txt` format:
 
 ```txt
-<timeoutMs> <intervalMs> [matrix]
+<timeoutMs> <intervalMs> [matrix] [rainStepMs]
 <ip1> <alertSeconds> [alias]
 <ip2> <alertSeconds> [alias]
 <ip3> <alertSeconds> [alias]
@@ -24,12 +24,13 @@ Meaning:
 - `timeoutMs` — ping timeout in milliseconds
 - `intervalMs` — delay between checks in milliseconds
 - add `matrix` to the first line to enable the animated Matrix display
+- `rainStepMs` — optional Matrix rain step duration in milliseconds (`100` by default); higher values slow the rain, lower values speed it up
 - each next line is `IP thresholdSeconds [alias]`; the optional alias may contain spaces
 
 Example:
 
 ```txt
-1000 1000 matrix
+1000 1000 matrix 100
 8.8.8.8 3 Google DNS
 1.1.1.1 60 Cloudflare DNS
 9.9.9.9 30 Quad9 DNS

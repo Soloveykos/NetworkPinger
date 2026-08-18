@@ -13,8 +13,10 @@
 #include <atomic>
 #include <cwchar>
 
+#ifdef _MSC_VER
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
+#endif
 
 #ifndef IP_SUCCESS
 #define IP_SUCCESS 0
@@ -33,7 +35,6 @@ constexpr int kDashboardWidth = 107;
 struct TargetState {
     std::string ip;
     std::string alias;
-    int targetIndex = 0;
     int alertThresholdSec = 30;
     bool soundEnabled = true;
     std::string status = "WAITING...";
@@ -59,6 +60,7 @@ struct Config {
     int intervalMs = 1000;
     int defaultThresholdSec = 30;
     bool matrixEnabled = false;
+    int rainStepMs = 100;
     std::vector<TargetConfig> targets;
 };
 
@@ -68,6 +70,7 @@ std::mutex g_logMutex;
 std::atomic<bool> g_shouldExit{false};
 std::vector<TargetState> g_targets;
 bool g_matrixEnabled = false;
+int g_rainStepMs = 100;
 
 std::string GetCurrentTimeStr();
 std::string GetCurrentDateTimeStr();
@@ -142,6 +145,10 @@ Config LoadConfig() {
                 std::string mode;
                 if (first >> mode && mode == "matrix") {
                     cfg.matrixEnabled = true;
+                    int rainStepMs = 0;
+                    if (first >> rainStepMs) {
+                        cfg.rainStepMs = std::clamp(rainStepMs, 25, 1000);
+                    }
                 }
             }
         }
@@ -503,7 +510,7 @@ void RenderDashboard() {
         return;
     }
 
-    if (now - lastMatrixStep < std::chrono::milliseconds(100)) {
+    if (now - lastMatrixStep < std::chrono::milliseconds(g_rainStepMs)) {
         return;
     }
 
@@ -566,11 +573,9 @@ void RenderDashboard() {
 
 void PingWorker(size_t index, int timeoutMs, int intervalMs) {
     std::string ip;
-    int alertThresholdSec = 30;
     {
         std::lock_guard<std::mutex> lock(g_dataMutex);
         ip = g_targets[index].ip;
-        alertThresholdSec = g_targets[index].alertThresholdSec;
     }
 
     HANDLE hIcmpFile = IcmpCreateFile();
@@ -600,6 +605,11 @@ void PingWorker(size_t index, int timeoutMs, int intervalMs) {
         }
 
         bool triggerSound = false;
+        bool shouldLogOutage = false;
+        std::string outageIp;
+        std::string outageAlias;
+        int outageDurationSec = 0;
+        std::string outageStartTimeStr;
 
         {
             std::lock_guard<std::mutex> lock(g_dataMutex);
@@ -608,35 +618,21 @@ void PingWorker(size_t index, int timeoutMs, int intervalMs) {
             t.lastPingSucceeded = isSuccess;
 
             if (isSuccess) {
-                std::string outageIp;
-                std::string outageAlias;
-                int outageDurationSec = 0;
-                std::string outageStartTimeStr;
-
                 if (t.isOutageLogged) {
                     auto now = std::chrono::system_clock::now();
-                    outageDurationSec = (int)std::chrono::duration_cast<std::chrono::seconds>(now - t.outageStartTime).count();
+                    outageDurationSec = std::max(0, static_cast<int>(
+                        std::chrono::duration_cast<std::chrono::seconds>(now - t.outageStartTime).count()
+                    ));
                     outageIp = t.ip;
                     outageAlias = t.alias;
                     outageStartTimeStr = t.outageStartTimeStr;
                     t.isOutageLogged = false;
+                    shouldLogOutage = true;
                 }
 
                 t.status = "ONLINE";
                 t.lastRtt = rtt;
                 t.consecutiveFails = 0;
-
-                if (!outageIp.empty()) {
-                    std::string endTimeStr = timeNow;
-                    std::lock_guard<std::mutex> logLock(g_logMutex);
-                    std::ofstream logFile("network_outages.log", std::ios::app);
-                    if (logFile.is_open()) {
-                        logFile << "[" << GetCurrentDateTimeStr() << "] "
-                                << FormatTargetName(outageIp, outageAlias) << " - був відсутній зв'язок " << FormatDuration(outageDurationSec) << " "
-                                << "(з " << outageStartTimeStr << " до " << endTimeStr << ")" << std::endl;
-                        logFile.flush();
-                    }
-                }
             } else {
                 t.consecutiveFails++;
                 t.lastRtt = -1;
@@ -662,6 +658,10 @@ void PingWorker(size_t index, int timeoutMs, int intervalMs) {
                     t.status = "DROPPING...";
                 }
             }
+        }
+
+        if (shouldLogOutage) {
+            LogOutageEvent(outageIp, outageAlias, outageDurationSec, outageStartTimeStr, timeNow);
         }
 
         if (triggerSound) {
@@ -700,11 +700,11 @@ int main() {
 
     Config cfg = LoadConfig();
     g_matrixEnabled = cfg.matrixEnabled;
+    g_rainStepMs = cfg.rainStepMs;
     for (size_t i = 0; i < cfg.targets.size(); ++i) {
         TargetState st;
         st.ip = cfg.targets[i].ip;
         st.alias = cfg.targets[i].alias;
-        st.targetIndex = (int)i;
         st.alertThresholdSec = cfg.targets[i].alertThresholdSec;
         g_targets.push_back(st);
     }

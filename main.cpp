@@ -23,6 +23,16 @@
 #define COLOR_GREEN   (FOREGROUND_GREEN | FOREGROUND_INTENSITY)
 #define COLOR_RED     (FOREGROUND_RED | FOREGROUND_INTENSITY)
 #define COLOR_YELLOW  (FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_INTENSITY)
+#define COLOR_GREEN_DIM FOREGROUND_GREEN
+#define COLOR_RED_DIM   FOREGROUND_RED
+
+constexpr const char* kMatrixGlyphs[] = {
+    "ｱ", "ｲ", "ｳ", "ｴ", "ｵ", "ｶ", "ｷ", "ｸ", "ｹ", "ｺ",
+    "ｻ", "ｼ", "ｽ", "ｾ", "ｿ", "ﾀ", "ﾁ", "ﾂ", "ﾃ", "ﾄ",
+    "ﾅ", "ﾆ", "ﾇ", "ﾈ", "ﾉ", "ﾊ", "ﾋ", "ﾌ", "ﾍ", "ﾎ",
+    "ﾏ", "ﾐ", "ﾑ", "ﾒ", "ﾓ", "ﾔ", "ﾕ", "ﾖ", "ﾗ", "ﾘ",
+    "ﾙ", "ﾚ", "ﾛ", "ﾜ", "ﾝ", "ｰ", "･", "ﾞ", "ﾟ"
+};
 
 struct TargetState {
     std::string ip;
@@ -34,6 +44,8 @@ struct TargetState {
     long lastRtt = 0;
     int consecutiveFails = 0;
     std::string lastChangeTime = "--:--:--";
+    bool lastPingSucceeded = true;
+    int matrixHead = 0;
     
     // Поля для відстеження тривалості падіння
     bool isOutageLogged = false;
@@ -51,6 +63,7 @@ struct Config {
     int timeoutMs = 1000;
     int intervalMs = 1000;
     int defaultThresholdSec = 30;
+    bool matrixEnabled = false;
     std::vector<TargetConfig> targets;
 };
 
@@ -59,6 +72,7 @@ std::mutex g_audioMutex;
 std::mutex g_logMutex;
 std::atomic<bool> g_shouldExit{false};
 std::vector<TargetState> g_targets;
+bool g_matrixEnabled = false;
 
 std::string GetCurrentTimeStr();
 std::string GetCurrentDateTimeStr();
@@ -118,6 +132,10 @@ Config LoadConfig() {
             if (first >> timeout >> interval) {
                 cfg.timeoutMs = timeout;
                 cfg.intervalMs = interval;
+                std::string mode;
+                if (first >> mode && mode == "matrix") {
+                    cfg.matrixEnabled = true;
+                }
             }
         }
 
@@ -277,6 +295,7 @@ void ProcessConsoleInput(HANDLE hInput) {
 }
 
 void RenderDashboard() {
+    static unsigned int matrixFrame = 0;
     MoveCursorToTop();
 
     SetColor(COLOR_DEFAULT);
@@ -342,6 +361,53 @@ void RenderDashboard() {
     SetColor(COLOR_DEFAULT);
     printf("=======================================================================\n");
     printf(" Click [ON ]/[OFF] for sound, or press Ctrl+C to stop monitor.\n");
+
+    if (!g_matrixEnabled) {
+        return;
+    }
+
+    CONSOLE_SCREEN_BUFFER_INFO consoleInfo;
+    int consoleWidth = 120;
+    int consoleHeight = 30;
+    if (GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &consoleInfo)) {
+        consoleWidth = consoleInfo.srWindow.Right - consoleInfo.srWindow.Left + 1;
+        consoleHeight = consoleInfo.srWindow.Bottom - consoleInfo.srWindow.Top + 1;
+    }
+
+    const int laneWidth = std::max(1, consoleWidth / static_cast<int>(g_targets.size()));
+    const int tableHeight = static_cast<int>(g_targets.size()) + 7;
+    const int matrixHeight = std::max(1, consoleHeight - tableHeight - 2);
+    for (size_t i = 0; i < g_targets.size(); ++i) {
+        auto& target = g_targets[i];
+        const int speedFrames = 1 + static_cast<int>(i % 3);
+        if (matrixFrame % speedFrames == 0) {
+            target.matrixHead = (target.matrixHead + 1) % matrixHeight;
+        }
+
+        const std::string label = target.alias.empty() ? target.ip : target.alias;
+        printf("%-*.*s", laneWidth, laneWidth, label.c_str());
+    }
+    printf("\n");
+
+    for (int row = 0; row < matrixHeight; ++row) {
+        for (size_t i = 0; i < g_targets.size(); ++i) {
+            const auto& target = g_targets[i];
+            const bool isHead = target.matrixHead == row;
+            const WORD color = target.lastPingSucceeded
+                ? (isHead ? COLOR_GREEN : COLOR_GREEN_DIM)
+                : (isHead ? COLOR_RED : COLOR_RED_DIM);
+            const size_t glyphIndex = (matrixFrame + row + i * 7) % (sizeof(kMatrixGlyphs) / sizeof(kMatrixGlyphs[0]));
+
+            printf("%*s", laneWidth / 2, "");
+            SetColor(color);
+            printf("%s", kMatrixGlyphs[glyphIndex]);
+            SetColor(COLOR_DEFAULT);
+            printf("%*s", laneWidth - laneWidth / 2 - 1, "");
+        }
+        printf("\n");
+    }
+
+    ++matrixFrame;
 }
 
 void PingWorker(size_t index, int timeoutMs, int intervalMs) {
@@ -385,6 +451,7 @@ void PingWorker(size_t index, int timeoutMs, int intervalMs) {
             std::lock_guard<std::mutex> lock(g_dataMutex);
             auto& t = g_targets[index];
             t.lastChangeTime = timeNow;
+            t.lastPingSucceeded = isSuccess;
 
             if (isSuccess) {
                 std::string outageIp;
@@ -478,6 +545,7 @@ int main() {
     SetConsoleCtrlHandler(ConsoleHandler, TRUE);
 
     Config cfg = LoadConfig();
+    g_matrixEnabled = cfg.matrixEnabled;
     for (size_t i = 0; i < cfg.targets.size(); ++i) {
         TargetState st;
         st.ip = cfg.targets[i].ip;

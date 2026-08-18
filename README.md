@@ -8,12 +8,13 @@ Small Windows console monitor that pings multiple IPs and shows their live conne
 - Logs outages to `network_outages.log`
 - Supports an individual alert threshold for each IP
 - Allows sound to be enabled or disabled per IP directly in the console
+- Renders animated Matrix-style packet streams under the table: green for delivered packets and red for missed packets
 
 ## Config
 `appsettings.txt` format:
 
 ```txt
-<timeoutMs> <intervalMs>
+<timeoutMs> <intervalMs> [matrix]
 <ip1> <alertSeconds> [alias]
 <ip2> <alertSeconds> [alias]
 <ip3> <alertSeconds> [alias]
@@ -22,12 +23,13 @@ Small Windows console monitor that pings multiple IPs and shows their live conne
 Meaning:
 - `timeoutMs` — ping timeout in milliseconds
 - `intervalMs` — delay between checks in milliseconds
+- add `matrix` to the first line to enable the animated Matrix display
 - each next line is `IP thresholdSeconds [alias]`; the optional alias may contain spaces
 
 Example:
 
 ```txt
-1000 1000
+1000 1000 matrix
 8.8.8.8 3 Google DNS
 1.1.1.1 60 Cloudflare DNS
 9.9.9.9 30 Quad9 DNS

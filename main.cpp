@@ -45,7 +45,6 @@ struct TargetState {
     int consecutiveFails = 0;
     std::string lastChangeTime = "--:--:--";
     bool lastPingSucceeded = true;
-    int matrixHead = 0;
     
     // Поля для відстеження тривалості падіння
     bool isOutageLogged = false;
@@ -378,12 +377,7 @@ void RenderDashboard() {
     const int tableHeight = static_cast<int>(g_targets.size()) + 7;
     const int matrixHeight = std::max(1, consoleHeight - tableHeight - 2);
     for (size_t i = 0; i < g_targets.size(); ++i) {
-        auto& target = g_targets[i];
-        const int speedFrames = 1 + static_cast<int>(i % 3);
-        if (matrixFrame % speedFrames == 0) {
-            target.matrixHead = (target.matrixHead + 1) % matrixHeight;
-        }
-
+        const auto& target = g_targets[i];
         const std::string label = target.alias.empty() ? target.ip : target.alias;
         printf("%-*.*s", laneWidth, laneWidth, label.c_str());
     }
@@ -392,10 +386,9 @@ void RenderDashboard() {
     for (int row = 0; row < matrixHeight; ++row) {
         for (size_t i = 0; i < g_targets.size(); ++i) {
             const auto& target = g_targets[i];
-            const bool isHead = target.matrixHead == row;
             const WORD color = target.lastPingSucceeded
-                ? (isHead ? COLOR_GREEN : COLOR_GREEN_DIM)
-                : (isHead ? COLOR_RED : COLOR_RED_DIM);
+                ? COLOR_GREEN_DIM
+                : COLOR_RED_DIM;
             const size_t glyphIndex = (matrixFrame + row + i * 7) % (sizeof(kMatrixGlyphs) / sizeof(kMatrixGlyphs[0]));
 
             printf("%*s", laneWidth / 2, "");

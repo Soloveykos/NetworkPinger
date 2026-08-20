@@ -27,6 +27,8 @@ Meaning:
 - `rainStepMs` — optional Matrix rain step duration in milliseconds (`100` by default); higher values slow the rain, lower values speed it up
 - each next line is `IP thresholdSeconds [alias]`; the optional alias may contain spaces
 
+The Matrix rain alphabet is defined in `kDefaultMatrixAlphabet` in `main.cpp`. Edit that constant and rebuild the program to change it.
+
 Example:
 
 ```txt

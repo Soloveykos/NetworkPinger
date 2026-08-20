@@ -1,6 +1,6 @@
-1000 1000 matrix 25
+1000 1000 matrix 100
 192.168.1.1 60 Starlink
 192.168.88.1 60 LTE
-11.11.11.11 60 Dnipro
+11.11.11.11 6 Dnipro
 1.1.1.1 60 Cloudflare
 8.8.8.8 60 Google

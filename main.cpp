@@ -29,7 +29,7 @@
 #define COLOR_GREEN_DIM FOREGROUND_GREEN
 #define COLOR_RED_DIM   FOREGROUND_RED
 
-constexpr wchar_t kMatrixGlyphs[] = L"ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ";
+constexpr char kDefaultMatrixAlphabet[] = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789";
 constexpr int kDashboardWidth = 107;
 
 struct TargetState {
@@ -71,12 +71,14 @@ std::atomic<bool> g_shouldExit{false};
 std::vector<TargetState> g_targets;
 bool g_matrixEnabled = false;
 int g_rainStepMs = 100;
+std::wstring g_matrixGlyphs;
 
 std::string GetCurrentTimeStr();
 std::string GetCurrentDateTimeStr();
 std::string FormatDuration(int durationSec);
 std::string FormatTargetName(const std::string& ip, const std::string& alias);
 void LogOutageEvent(const std::string& ip, const std::string& alias, int durationSec, const std::string& startTimeStr, const std::string& endTimeStr);
+std::wstring Utf8ToWide(const std::string& text);
 
 WORD GetMatrixColor(const TargetState& target, bool bright) {
     if (target.status == "DROPPING...") {
@@ -442,9 +444,9 @@ void RenderDashboard() {
     const int tableHeight = static_cast<int>(g_targets.size()) + 7;
     const int matrixHeight = std::max(1, consoleHeight - tableHeight);
     const int glyphRows = matrixHeight - 1;
-    const int maxRainLength = std::max(5, std::min(18, glyphRows / 2));
+    const int maxRainLength = std::max(6, std::min(24, glyphRows * 2 / 3));
     const int laneWidth = std::max(1, matrixWidth / static_cast<int>(g_targets.size()));
-    const size_t glyphCount = std::wcslen(kMatrixGlyphs);
+    const size_t glyphCount = g_matrixGlyphs.size();
     HANDLE hConsole = GetStdHandle(STD_OUTPUT_HANDLE);
 
     struct RainStream {
@@ -466,11 +468,25 @@ void RenderDashboard() {
         targetColors.push_back(GetMatrixColor(target, false));
     }
 
-    const bool needsFullRender = renderedWidth != consoleWidth ||
+    const bool needsGeometryRender = renderedWidth != consoleWidth ||
         renderedHeight != matrixHeight ||
-        renderedColors != targetColors;
+        rainStreams.size() != static_cast<size_t>(matrixWidth);
 
-    if (needsFullRender) {
+    const auto writeCell = [&](int column, int glyphRow, wchar_t glyph, WORD color) {
+        if (glyphRow < 0 || glyphRow >= glyphRows) {
+            return;
+        }
+
+        CHAR_INFO cell = {};
+        cell.Char.UnicodeChar = glyph;
+        cell.Attributes = color;
+        COORD updateSize = { 1, 1 };
+        COORD updateOrigin = { 0, 0 };
+        SMALL_RECT updateRect = { static_cast<SHORT>(column), static_cast<SHORT>(tableHeight + glyphRow + 1), static_cast<SHORT>(column), static_cast<SHORT>(tableHeight + glyphRow + 1) };
+        WriteConsoleOutputW(hConsole, &cell, updateSize, updateOrigin, &updateRect);
+    };
+
+    if (needsGeometryRender) {
         std::vector<CHAR_INFO> matrixBuffer(static_cast<size_t>(consoleWidth) * matrixHeight);
         for (auto& cell : matrixBuffer) {
             cell.Char.UnicodeChar = L' ';
@@ -499,7 +515,7 @@ void RenderDashboard() {
         renderedColors = targetColors;
         rainStreams.clear();
         for (int column = 0; column < matrixWidth; ++column) {
-            const int length = 4 + (randomState % std::max(1, maxRainLength - 3));
+            const int length = 6 + (randomState % std::max(1, maxRainLength - 5));
             randomState = randomState * 1664525u + 1013904223u;
             const int startRow = -static_cast<int>(randomState % std::max(1, glyphRows + length));
             rainStreams.push_back({ startRow, length, 2 + static_cast<int>(randomState % 4), static_cast<int>(randomState % 5) });
@@ -508,6 +524,29 @@ void RenderDashboard() {
         rainTick = 0;
         lastMatrixStep = now;
         return;
+    }
+
+    if (renderedColors != targetColors) {
+        DWORD cellsWritten = 0;
+        for (size_t i = 0; i < g_targets.size(); ++i) {
+            const int labelStart = static_cast<int>(i) * laneWidth;
+            FillConsoleOutputAttribute(hConsole, GetMatrixColor(g_targets[i], true),
+                static_cast<DWORD>(std::min(laneWidth, matrixWidth - labelStart)),
+                { static_cast<SHORT>(labelStart), static_cast<SHORT>(tableHeight) }, &cellsWritten);
+        }
+
+        for (int column = 0; column < matrixWidth; ++column) {
+            const RainStream& stream = rainStreams[column];
+            const size_t targetIndex = std::min(g_targets.size() - 1, static_cast<size_t>(column / laneWidth));
+            const int firstRow = std::max(0, stream.headRow - stream.length + 1);
+            const int lastRow = std::min(glyphRows - 1, stream.headRow + 1);
+            if (firstRow <= lastRow) {
+                FillConsoleOutputAttribute(hConsole, targetColors[targetIndex],
+                    static_cast<DWORD>(lastRow - firstRow + 1),
+                    { static_cast<SHORT>(column), static_cast<SHORT>(tableHeight + firstRow + 1) }, &cellsWritten);
+            }
+        }
+        renderedColors = targetColors;
     }
 
     if (now - lastMatrixStep < std::chrono::milliseconds(g_rainStepMs)) {
@@ -525,20 +564,6 @@ void RenderDashboard() {
         return randomState;
     };
 
-    const auto writeCell = [&](int column, int glyphRow, wchar_t glyph, WORD color) {
-        if (glyphRow < 0 || glyphRow >= glyphRows) {
-            return;
-        }
-
-        CHAR_INFO cell = {};
-        cell.Char.UnicodeChar = glyph;
-        cell.Attributes = color;
-        COORD updateSize = { 1, 1 };
-        COORD updateOrigin = { 0, 0 };
-        SMALL_RECT updateRect = { static_cast<SHORT>(column), static_cast<SHORT>(tableHeight + glyphRow + 1), static_cast<SHORT>(column), static_cast<SHORT>(tableHeight + glyphRow + 1) };
-        WriteConsoleOutputW(hConsole, &cell, updateSize, updateOrigin, &updateRect);
-    };
-
     ++rainTick;
     for (int column = 0; column < matrixWidth; ++column) {
         RainStream& stream = rainStreams[column];
@@ -549,18 +574,18 @@ void RenderDashboard() {
         const size_t targetIndex = std::min(g_targets.size() - 1, static_cast<size_t>(column / laneWidth));
         const int tailRow = stream.headRow - stream.length;
         writeCell(column, tailRow, L' ', COLOR_DEFAULT);
-        writeCell(column, stream.headRow, kMatrixGlyphs[nextRandom() % glyphCount], targetColors[targetIndex]);
+        writeCell(column, stream.headRow, g_matrixGlyphs[nextRandom() % glyphCount], targetColors[targetIndex]);
 
         ++stream.headRow;
         writeCell(
             column,
             stream.headRow,
-            kMatrixGlyphs[nextRandom() % glyphCount],
+            g_matrixGlyphs[nextRandom() % glyphCount],
             FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY
         );
 
         if (stream.headRow - stream.length >= glyphRows) {
-            stream.length = 4 + static_cast<int>(nextRandom() % std::max(1, maxRainLength - 3));
+            stream.length = 6 + static_cast<int>(nextRandom() % std::max(1, maxRainLength - 5));
             stream.cadence = 2 + static_cast<int>(nextRandom() % 4);
             stream.phase = static_cast<int>(nextRandom() % stream.cadence);
             stream.headRow = -static_cast<int>(nextRandom() % std::max(1, glyphRows / 2));
@@ -701,6 +726,7 @@ int main() {
     Config cfg = LoadConfig();
     g_matrixEnabled = cfg.matrixEnabled;
     g_rainStepMs = cfg.rainStepMs;
+    g_matrixGlyphs = Utf8ToWide(kDefaultMatrixAlphabet);
     for (size_t i = 0; i < cfg.targets.size(); ++i) {
         TargetState st;
         st.ip = cfg.targets[i].ip;

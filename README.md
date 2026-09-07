@@ -8,6 +8,9 @@ Small Windows console monitor that pings multiple IPs and shows their live conne
 - Logs outages to `network_outages.log`
 - Supports an individual alert threshold for each IP
 - Allows sound to be enabled or disabled per IP directly in the console
+- Measures download and upload speed every hour with Ookla Speedtest CLI
+- Shows speed in Mbps: green at 70 Mbps or more, yellow from 50 to 69.99 Mbps, and red below 50 Mbps
+- Logs yellow and red speed measurements to `internet_speed.log`
 - Renders animated Matrix-style packet streams under the table: green for delivered packets and red for missed packets
 
 ## Config
@@ -39,6 +42,12 @@ Example:
 ```
 
 Each IP can have its own outage threshold, alias, and sound state. If the ping fails repeatedly for longer than that value, the app marks it as outage and triggers the alert once. Outage logs use a readable duration such as `1г. 2хв. 3сек.`. Click the green `[ON ]` or red `[OFF]` value in the `Sound` column to toggle sound for that IP.
+
+## Internet Speed Test
+
+Download the official Ookla Speedtest CLI and place `speedtest.exe` in the `tools` folder next to the program source. The build or release folder must keep the same layout: `NetworkPinger.exe` and `tools\speedtest.exe`. The program measures speed immediately after startup, then repeats every hour. The result is displayed below the target table in Mbps (megabits per second). A measurement is green only when both download and upload are at least 70 Mbps; it is yellow when either is from 50 to 69.99 Mbps, and red when either is below 50 Mbps. Yellow and red measurements are recorded in `internet_speed.log`.
+
+If the dashboard reports that `speedtest.exe` is unavailable, confirm that `tools\speedtest.exe` was copied alongside `NetworkPinger.exe`.
 
 ## Build / Run
 Build with W64DevKit on Windows. In PowerShell, run:

@@ -12,6 +12,8 @@
 #include <mutex>
 #include <atomic>
 #include <cwchar>
+#include <cstdio>
+#include <regex>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "iphlpapi.lib")
@@ -31,6 +33,9 @@
 
 constexpr char kDefaultMatrixAlphabet[] = "ｱｲｳｴｵｶｷｸｹｺｻｼｽｾｿﾀﾁﾂﾃﾄﾅﾆﾇﾈﾉﾊﾋﾌﾍﾎﾏﾐﾑﾒﾓﾔﾕﾖﾗﾘﾙﾚﾛﾜﾝ0123456789";
 constexpr int kDashboardWidth = 107;
+constexpr int kSpeedTestIntervalHours = 1;
+constexpr double kSpeedGreenThresholdMbps = 70.0;
+constexpr double kSpeedYellowThresholdMbps = 50.0;
 
 struct TargetState {
     std::string ip;
@@ -64,11 +69,29 @@ struct Config {
     std::vector<TargetConfig> targets;
 };
 
+enum class SpeedStatus {
+    Waiting,
+    Measuring,
+    Green,
+    Yellow,
+    Red,
+    Error
+};
+
+struct SpeedTestState {
+    SpeedStatus status = SpeedStatus::Waiting;
+    double downloadMbps = 0.0;
+    double uploadMbps = 0.0;
+    std::string lastUpdateTime = "--:--:--";
+    std::string error;
+};
+
 std::mutex g_dataMutex;
 std::mutex g_audioMutex;
 std::mutex g_logMutex;
 std::atomic<bool> g_shouldExit{false};
 std::vector<TargetState> g_targets;
+SpeedTestState g_speedTest;
 bool g_matrixEnabled = false;
 int g_rainStepMs = 100;
 std::wstring g_matrixGlyphs;
@@ -78,6 +101,7 @@ std::string GetCurrentDateTimeStr();
 std::string FormatDuration(int durationSec);
 std::string FormatTargetName(const std::string& ip, const std::string& alias);
 void LogOutageEvent(const std::string& ip, const std::string& alias, int durationSec, const std::string& startTimeStr, const std::string& endTimeStr);
+void LogSpeedEvent(double downloadMbps, double uploadMbps, const std::string& status);
 std::wstring Utf8ToWide(const std::string& text);
 
 WORD GetMatrixColor(const TargetState& target, bool bright) {
@@ -234,6 +258,148 @@ void LogOutageEvent(const std::string& ip, const std::string& alias, int duratio
                 << FormatTargetName(ip, alias) << " - був відсутній зв'язок " << FormatDuration(durationSec) << " "
                 << "(з " << startTimeStr << " до " << endTimeStr << ")" << std::endl;
         logFile.flush();
+    }
+}
+
+void LogSpeedEvent(double downloadMbps, double uploadMbps, const std::string& status) {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    std::ofstream logFile("internet_speed.log", std::ios::app);
+    if (logFile.is_open()) {
+        logFile << "[" << GetCurrentDateTimeStr() << "] "
+                << status << ": download " << std::fixed << std::setprecision(2) << downloadMbps << " Mbps, "
+                << "upload " << uploadMbps << " Mbps" << std::endl;
+        logFile.flush();
+    }
+}
+
+bool ExtractSpeedtestBandwidth(const std::string& result, const char* direction, double& megabitsPerSecond) {
+    const std::regex bandwidthPattern(
+        std::string("\\\"") + direction + "\\\"\\s*:\\s*\\{[\\s\\S]*?\\\"bandwidth\\\"\\s*:\\s*([0-9]+(?:\\.[0-9]+)?)"
+    );
+    std::smatch match;
+    if (!std::regex_search(result, match, bandwidthPattern)) {
+        return false;
+    }
+
+    try {
+        megabitsPerSecond = std::stod(match[1].str()) * 8.0 / 1000000.0;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+std::string ExtractSpeedtestError(const std::string& result) {
+    const std::regex messagePattern("\\\"message\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
+    std::sregex_iterator match(result.begin(), result.end(), messagePattern);
+    const std::sregex_iterator end;
+    std::string error;
+
+    for (; match != end; ++match) {
+        error = (*match)[1].str();
+    }
+
+    return error.empty() ? "Speedtest did not return a measurement" : error;
+}
+
+SpeedStatus GetSpeedStatus(double downloadMbps, double uploadMbps) {
+    const double slowerSpeed = std::min(downloadMbps, uploadMbps);
+    if (slowerSpeed >= kSpeedGreenThresholdMbps) {
+        return SpeedStatus::Green;
+    }
+    if (slowerSpeed >= kSpeedYellowThresholdMbps) {
+        return SpeedStatus::Yellow;
+    }
+    return SpeedStatus::Red;
+}
+
+const char* GetSpeedStatusText(SpeedStatus status) {
+    switch (status) {
+        case SpeedStatus::Waiting: return "WAITING";
+        case SpeedStatus::Measuring: return "MEASURING";
+        case SpeedStatus::Green: return "GOOD";
+        case SpeedStatus::Yellow: return "WARNING";
+        case SpeedStatus::Red: return "LOW";
+        case SpeedStatus::Error: return "ERROR";
+    }
+    return "UNKNOWN";
+}
+
+WORD GetSpeedStatusColor(SpeedStatus status) {
+    switch (status) {
+        case SpeedStatus::Green: return COLOR_GREEN;
+        case SpeedStatus::Yellow: return COLOR_YELLOW;
+        case SpeedStatus::Red:
+        case SpeedStatus::Error: return COLOR_RED;
+        default: return COLOR_DEFAULT;
+    }
+}
+
+std::string GetSpeedtestCommand() {
+    char executablePath[MAX_PATH] = {};
+    const DWORD pathLength = GetModuleFileNameA(nullptr, executablePath, MAX_PATH);
+    if (pathLength == 0 || pathLength == MAX_PATH) {
+        return "\".\\tools\\speedtest.exe\"";
+    }
+
+    std::string executableDirectory(executablePath, pathLength);
+    const size_t separator = executableDirectory.find_last_of("\\/");
+    if (separator == std::string::npos) {
+        return "\".\\tools\\speedtest.exe\"";
+    }
+
+    return "\"" + executableDirectory.substr(0, separator + 1) + "tools\\speedtest.exe\"";
+}
+
+void SpeedTestWorker() {
+    while (!g_shouldExit) {
+        {
+            std::lock_guard<std::mutex> lock(g_dataMutex);
+            g_speedTest.status = SpeedStatus::Measuring;
+            g_speedTest.error.clear();
+        }
+
+        std::string result;
+        const std::string command = GetSpeedtestCommand() + " --format=json 2>&1";
+        FILE* speedtest = _popen(command.c_str(), "r");
+        if (speedtest != nullptr) {
+            char buffer[512];
+            while (fgets(buffer, sizeof(buffer), speedtest) != nullptr) {
+                result += buffer;
+            }
+            _pclose(speedtest);
+        }
+
+        double downloadMbps = 0.0;
+        double uploadMbps = 0.0;
+        const bool measured = speedtest != nullptr &&
+                              ExtractSpeedtestBandwidth(result, "download", downloadMbps) &&
+                              ExtractSpeedtestBandwidth(result, "upload", uploadMbps);
+
+        if (measured) {
+            const SpeedStatus status = GetSpeedStatus(downloadMbps, uploadMbps);
+            {
+                std::lock_guard<std::mutex> lock(g_dataMutex);
+                g_speedTest.status = status;
+                g_speedTest.downloadMbps = downloadMbps;
+                g_speedTest.uploadMbps = uploadMbps;
+                g_speedTest.lastUpdateTime = GetCurrentTimeStr();
+                g_speedTest.error.clear();
+            }
+
+            if (status == SpeedStatus::Yellow || status == SpeedStatus::Red) {
+                LogSpeedEvent(downloadMbps, uploadMbps, GetSpeedStatusText(status));
+            }
+        } else {
+            std::lock_guard<std::mutex> lock(g_dataMutex);
+            g_speedTest.status = SpeedStatus::Error;
+            g_speedTest.lastUpdateTime = GetCurrentTimeStr();
+            g_speedTest.error = speedtest == nullptr ? "Could not start tools\\speedtest.exe" : ExtractSpeedtestError(result);
+        }
+
+        for (int elapsedSeconds = 0; elapsedSeconds < kSpeedTestIntervalHours * 3600 && !g_shouldExit; ++elapsedSeconds) {
+            Sleep(1000);
+        }
     }
 }
 
@@ -423,6 +589,17 @@ void RenderDashboard() {
 
         SetColor(COLOR_DEFAULT);
         printf("=======================================================================\n");
+        const SpeedTestState speedTest = g_speedTest;
+        SetColor(GetSpeedStatusColor(speedTest.status));
+        if (speedTest.status == SpeedStatus::Error) {
+            printf(" Internet speed: %-9s | %s | Last check: %s\n", GetSpeedStatusText(speedTest.status), speedTest.error.c_str(), speedTest.lastUpdateTime.c_str());
+        } else if (speedTest.status == SpeedStatus::Waiting || speedTest.status == SpeedStatus::Measuring) {
+            printf(" Internet speed: %-9s | Last check: %s\n", GetSpeedStatusText(speedTest.status), speedTest.lastUpdateTime.c_str());
+        } else {
+            printf(" Internet speed: %-9s | Download: %7.2f Mbps | Upload: %7.2f Mbps | Last check: %s\n",
+                GetSpeedStatusText(speedTest.status), speedTest.downloadMbps, speedTest.uploadMbps, speedTest.lastUpdateTime.c_str());
+        }
+        SetColor(COLOR_DEFAULT);
         printf(" Click [ON ]/[OFF] for sound, or press Ctrl+C to stop monitor.\n");
     }
 
@@ -441,7 +618,7 @@ void RenderDashboard() {
     }
 
     const int matrixWidth = std::min(consoleWidth, kDashboardWidth);
-    const int tableHeight = static_cast<int>(g_targets.size()) + 7;
+    const int tableHeight = static_cast<int>(g_targets.size()) + 8;
     const int matrixHeight = std::max(1, consoleHeight - tableHeight);
     const int glyphRows = matrixHeight - 1;
     const int maxRainLength = std::max(6, std::min(24, glyphRows * 2 / 3));
@@ -739,6 +916,7 @@ int main() {
     for (size_t i = 0; i < cfg.targets.size(); ++i) {
         threads.emplace_back(PingWorker, i, cfg.timeoutMs, cfg.intervalMs);
     }
+    threads.emplace_back(SpeedTestWorker);
 
     while (!g_shouldExit) {
         ProcessConsoleInput(hInput);

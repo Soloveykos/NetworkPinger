@@ -12,6 +12,8 @@
 #include <mutex>
 #include <atomic>
 #include <cwchar>
+#include <algorithm>
+#include <cstdlib>
 
 #ifdef _MSC_VER
 #pragma comment(lib, "iphlpapi.lib")
@@ -73,12 +75,334 @@ bool g_matrixEnabled = false;
 int g_rainStepMs = 100;
 std::wstring g_matrixGlyphs;
 
+struct SpeedtestResult {
+    bool hasRun = false;
+    bool isRunning = false;
+    bool success = false;
+    double downloadMbps = 0.0;
+    double uploadMbps = 0.0;
+    double pingMs = 0.0;
+    std::string serverName;
+    std::string isp;
+    std::string timestampStr;
+    std::string errorMessage;
+};
+
+std::mutex g_speedtestMutex;
+SpeedtestResult g_speedtest;
+
 std::string GetCurrentTimeStr();
 std::string GetCurrentDateTimeStr();
 std::string FormatDuration(int durationSec);
 std::string FormatTargetName(const std::string& ip, const std::string& alias);
 void LogOutageEvent(const std::string& ip, const std::string& alias, int durationSec, const std::string& startTimeStr, const std::string& endTimeStr);
 std::wstring Utf8ToWide(const std::string& text);
+
+WORD GetSpeedColor(double mbps) {
+    if (mbps < 60.0) {
+        return COLOR_RED;
+    }
+    if (mbps < 120.0) {
+        return COLOR_YELLOW;
+    }
+    return COLOR_GREEN;
+}
+
+int GetEffectiveRainStepMs() {
+    std::lock_guard<std::mutex> lock(g_speedtestMutex);
+    if (!g_speedtest.hasRun || !g_speedtest.success) {
+        return 10;   // Якщо ще не виміряли або помилка виміру — тримаємо швидкий крок 10 ms
+    }
+
+    const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);
+    if (worstSpeed >= 120.0) {
+        return 10;    // Швидкий дощ (зелена швидкість >= 120 Mbps)
+    } else if (worstSpeed >= 60.0) {
+        return 400;   // Помірна швидкість дощу (жовта швидкість 60..120 Mbps)
+    } else {
+        return 1000;  // Дуже повільний дощ (червона швидкість < 60 Mbps)
+    }
+}
+
+void LogSpeedtestEvent(const SpeedtestResult& res) {
+    std::lock_guard<std::mutex> lock(g_logMutex);
+    std::ofstream logFile("speedtest.log", std::ios::app);
+    if (logFile.is_open()) {
+        if (res.success) {
+            logFile << "[" << res.timestampStr << "] "
+                    << "Download: " << std::fixed << std::setprecision(2) << res.downloadMbps << " Mbps, "
+                    << "Upload: " << std::fixed << std::setprecision(2) << res.uploadMbps << " Mbps, "
+                    << "Ping: " << std::fixed << std::setprecision(1) << res.pingMs << " ms";
+            if (!res.serverName.empty()) {
+                logFile << " (" << res.serverName << ")";
+            }
+            logFile << std::endl;
+        } else {
+            logFile << "[" << res.timestampStr << "] Speedtest failed: " << res.errorMessage << std::endl;
+        }
+        logFile.flush();
+    }
+}
+
+std::string FindSpeedtestExecutable() {
+    const std::vector<std::string> candidates = {
+        "speedtest.exe",
+        ".\\speedtest.exe",
+        "tools\\speedtest.exe",
+        "tools/speedtest.exe",
+        ".\\tools\\speedtest.exe"
+    };
+
+    for (const auto& path : candidates) {
+        DWORD attrib = GetFileAttributesA(path.c_str());
+        if (attrib != INVALID_FILE_ATTRIBUTES && !(attrib & FILE_ATTRIBUTE_DIRECTORY)) {
+            return path;
+        }
+    }
+    return "speedtest.exe";
+}
+
+bool RunSpeedtestProcess(const std::string& exePath, std::string& outJson, std::string& outErr) {
+    SECURITY_ATTRIBUTES saAttr;
+    saAttr.nLength = sizeof(SECURITY_ATTRIBUTES);
+    saAttr.bInheritHandle = TRUE;
+    saAttr.lpSecurityDescriptor = NULL;
+
+    HANDLE hChildStdOutRead = NULL;
+    HANDLE hChildStdOutWrite = NULL;
+
+    if (!CreatePipe(&hChildStdOutRead, &hChildStdOutWrite, &saAttr, 0)) {
+        outErr = "Failed to create pipe";
+        return false;
+    }
+    SetHandleInformation(hChildStdOutRead, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(STARTUPINFOA));
+    si.cb = sizeof(STARTUPINFOA);
+    si.hStdError = hChildStdOutWrite;
+    si.hStdOutput = hChildStdOutWrite;
+    si.dwFlags |= STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(PROCESS_INFORMATION));
+
+    std::string cmd = "\"" + exePath + "\" --accept-license --accept-gdpr -f json";
+    std::vector<char> cmdBuffer(cmd.begin(), cmd.end());
+    cmdBuffer.push_back('\0');
+
+    BOOL success = CreateProcessA(
+        NULL,
+        cmdBuffer.data(),
+        NULL,
+        NULL,
+        TRUE,
+        CREATE_NO_WINDOW,
+        NULL,
+        NULL,
+        &si,
+        &pi
+    );
+
+    CloseHandle(hChildStdOutWrite);
+
+    if (!success) {
+        CloseHandle(hChildStdOutRead);
+        outErr = "Failed to launch speedtest executable (" + exePath + ")";
+        return false;
+    }
+
+    std::string output;
+    char buffer[1024];
+    DWORD bytesRead = 0;
+    while (ReadFile(hChildStdOutRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
+        buffer[bytesRead] = '\0';
+        output.append(buffer, bytesRead);
+    }
+
+    CloseHandle(hChildStdOutRead);
+
+    DWORD waitResult = WAIT_TIMEOUT;
+    while (!g_shouldExit) {
+        waitResult = WaitForSingleObject(pi.hProcess, 500);
+        if (waitResult != WAIT_TIMEOUT) {
+            break;
+        }
+    }
+
+    if (g_shouldExit && waitResult == WAIT_TIMEOUT) {
+        TerminateProcess(pi.hProcess, 1);
+    }
+
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    outJson = output;
+    return (exitCode == 0);
+}
+
+static double ExtractJsonNumber(const std::string& json, size_t sectionStart, const std::string& key) {
+    size_t keyPos = json.find(key, sectionStart);
+    if (keyPos == std::string::npos) return -1.0;
+    size_t colonPos = json.find(':', keyPos);
+    if (colonPos == std::string::npos) return -1.0;
+    size_t numStart = json.find_first_of("0123456789.-", colonPos);
+    if (numStart == std::string::npos) return -1.0;
+    char* endPtr = nullptr;
+    double val = std::strtod(json.c_str() + numStart, &endPtr);
+    return val;
+}
+
+static std::string ExtractJsonString(const std::string& json, size_t sectionStart, const std::string& key) {
+    size_t keyPos = json.find(key, sectionStart);
+    if (keyPos == std::string::npos) return "";
+    size_t colonPos = json.find(':', keyPos);
+    if (colonPos == std::string::npos) return "";
+    size_t quoteStart = json.find('"', colonPos);
+    if (quoteStart == std::string::npos) return "";
+    size_t quoteEnd = json.find('"', quoteStart + 1);
+    if (quoteEnd == std::string::npos) return "";
+    return json.substr(quoteStart + 1, quoteEnd - quoteStart - 1);
+}
+
+bool ParseSpeedtestJson(const std::string& jsonStr, SpeedtestResult& res) {
+    size_t dlPos = jsonStr.find("\"download\"");
+    size_t ulPos = jsonStr.find("\"upload\"");
+    size_t pingPos = jsonStr.find("\"ping\"");
+
+    if (dlPos == std::string::npos || ulPos == std::string::npos) {
+        return false;
+    }
+
+    double dlBandwidth = ExtractJsonNumber(jsonStr, dlPos, "\"bandwidth\"");
+    double ulBandwidth = ExtractJsonNumber(jsonStr, ulPos, "\"bandwidth\"");
+
+    if (dlBandwidth < 0 || ulBandwidth < 0) {
+        return false;
+    }
+
+    // Convert bytes per second to Mbps (1 byte = 8 bits, 1 Mbps = 1,000,000 bps)
+    res.downloadMbps = (dlBandwidth * 8.0) / 1000000.0;
+    res.uploadMbps = (ulBandwidth * 8.0) / 1000000.0;
+
+    if (pingPos != std::string::npos) {
+        double latency = ExtractJsonNumber(jsonStr, pingPos, "\"latency\"");
+        if (latency >= 0) {
+            res.pingMs = latency;
+        }
+    }
+
+    size_t serverPos = jsonStr.find("\"server\"");
+    if (serverPos != std::string::npos) {
+        std::string serverName = ExtractJsonString(jsonStr, serverPos, "\"name\"");
+        std::string location = ExtractJsonString(jsonStr, serverPos, "\"location\"");
+        if (!serverName.empty()) {
+            res.serverName = serverName;
+            if (!location.empty() && location != serverName) {
+                res.serverName += " - " + location;
+            }
+        }
+    }
+
+    std::string isp = ExtractJsonString(jsonStr, 0, "\"isp\"");
+    if (!isp.empty()) {
+        res.isp = isp;
+        if (res.serverName.empty()) {
+            res.serverName = isp;
+        }
+    }
+
+    res.success = true;
+    return true;
+}
+
+void SpeedtestWorker() {
+    bool isFirstRun = true;
+    bool lastRunSucceeded = false;
+
+    while (!g_shouldExit) {
+        if (!isFirstRun) {
+            auto now = std::chrono::system_clock::now();
+            auto nowTimeT = std::chrono::system_clock::to_time_t(now);
+            std::tm localTm = *std::localtime(&nowTimeT);
+
+            // Schedule for next full hour (:00:00)
+            localTm.tm_min = 0;
+            localTm.tm_sec = 0;
+            localTm.tm_hour += 1;
+            std::time_t nextHourTimeT = std::mktime(&localTm);
+            auto nextWakePoint = std::chrono::system_clock::from_time_t(nextHourTimeT);
+
+            // If last attempt failed, retry after 60 seconds instead of waiting full hour
+            if (!lastRunSucceeded) {
+                auto retryPoint = now + std::chrono::seconds(60);
+                if (retryPoint < nextWakePoint) {
+                    nextWakePoint = retryPoint;
+                }
+            }
+
+            while (!g_shouldExit && std::chrono::system_clock::now() < nextWakePoint) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
+
+            if (g_shouldExit) {
+                break;
+            }
+        }
+
+        isFirstRun = false;
+
+        {
+            std::lock_guard<std::mutex> lock(g_speedtestMutex);
+            g_speedtest.isRunning = true;
+        }
+
+        std::string exePath = FindSpeedtestExecutable();
+        std::string outJson;
+        std::string outErr;
+        bool procOk = RunSpeedtestProcess(exePath, outJson, outErr);
+
+        std::string timeNow = GetCurrentDateTimeStr();
+        SpeedtestResult result;
+        result.timestampStr = timeNow;
+        result.isRunning = false;
+        result.hasRun = true;
+
+        if (procOk && ParseSpeedtestJson(outJson, result)) {
+            result.success = true;
+            lastRunSucceeded = true;
+        } else {
+            result.success = false;
+            lastRunSucceeded = false;
+            if (!outErr.empty()) {
+                result.errorMessage = outErr;
+            } else {
+                std::string msg = ExtractJsonString(outJson, 0, "\"message\"");
+                if (!msg.empty()) {
+                    if (msg.find("Configuration") != std::string::npos || msg.find("unreachable") != std::string::npos) {
+                        result.errorMessage = "No connection to Ookla servers (Network unreachable)";
+                    } else {
+                        result.errorMessage = msg;
+                    }
+                } else if (outJson.find("Network is unreachable") != std::string::npos || outJson.find("Couldn't connect") != std::string::npos) {
+                    result.errorMessage = "No connection to Ookla servers (Network unreachable)";
+                } else {
+                    result.errorMessage = "Speedtest error / no server connection";
+                }
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(g_speedtestMutex);
+            g_speedtest = result;
+        }
+
+        LogSpeedtestEvent(result);
+    }
+}
 
 WORD GetMatrixColor(const TargetState& target, bool bright) {
     if (target.status == "DROPPING...") {
@@ -424,6 +748,52 @@ void RenderDashboard() {
         SetColor(COLOR_DEFAULT);
         printf("=======================================================================\n");
         printf(" Click [ON ]/[OFF] for sound, or press Ctrl+C to stop monitor.\n");
+        printf("-----------------------------------------------------------------------\n");
+        {
+            std::lock_guard<std::mutex> lock(g_speedtestMutex);
+            printf(" Speedtest : ");
+            if (g_speedtest.isRunning && !g_speedtest.hasRun) {
+                SetColor(COLOR_YELLOW);
+                printf("[TESTING...] Initial speed measurement in progress...");
+                SetColor(COLOR_DEFAULT);
+            } else if (g_speedtest.isRunning && g_speedtest.hasRun) {
+                const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);
+                const WORD overallColor = GetSpeedColor(worstSpeed);
+                SetColor(overallColor);
+                printf("DL: %.2f Mbps | UL: %.2f Mbps", g_speedtest.downloadMbps, g_speedtest.uploadMbps);
+                SetColor(COLOR_DEFAULT);
+                printf(" | ");
+                SetColor(COLOR_YELLOW);
+                printf("[MEASURING NOW...]");
+                SetColor(COLOR_DEFAULT);
+            } else if (g_speedtest.hasRun && g_speedtest.success) {
+                const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);
+                const WORD overallColor = GetSpeedColor(worstSpeed);
+                SetColor(overallColor);
+                printf("DL: %.2f Mbps | UL: %.2f Mbps | Ping: %.1f ms",
+                       g_speedtest.downloadMbps, g_speedtest.uploadMbps, g_speedtest.pingMs);
+                if (!g_speedtest.serverName.empty()) {
+                    std::string sName = g_speedtest.serverName;
+                    if (sName.length() > 18) sName = sName.substr(0, 15) + "...";
+                    printf(" (%s)", sName.c_str());
+                }
+                printf(" [%s]", g_speedtest.timestampStr.c_str());
+                SetColor(COLOR_DEFAULT);
+            } else if (g_speedtest.hasRun && !g_speedtest.success) {
+                SetColor(COLOR_RED);
+                std::string eMsg = g_speedtest.errorMessage;
+                if (eMsg.length() > 38) eMsg = eMsg.substr(0, 35) + "...";
+                printf("[FAILED] %s", eMsg.c_str());
+                if (!g_speedtest.timestampStr.empty()) {
+                    printf(" [%s]", g_speedtest.timestampStr.c_str());
+                }
+                SetColor(COLOR_DEFAULT);
+            } else {
+                printf("Waiting for initial measurement...");
+            }
+            printf("\n");
+        }
+        printf("=======================================================================\n");
     }
 
     if (!g_matrixEnabled) {
@@ -441,7 +811,7 @@ void RenderDashboard() {
     }
 
     const int matrixWidth = std::min(consoleWidth, kDashboardWidth);
-    const int tableHeight = static_cast<int>(g_targets.size()) + 7;
+    const int tableHeight = static_cast<int>(g_targets.size()) + 10;
     const int matrixHeight = std::max(1, consoleHeight - tableHeight);
     const int glyphRows = matrixHeight - 1;
     const int maxRainLength = std::max(6, std::min(24, glyphRows * 2 / 3));
@@ -549,7 +919,8 @@ void RenderDashboard() {
         renderedColors = targetColors;
     }
 
-    if (now - lastMatrixStep < std::chrono::milliseconds(g_rainStepMs)) {
+    const int currentRainStepMs = GetEffectiveRainStepMs();
+    if (now - lastMatrixStep < std::chrono::milliseconds(currentRainStepMs)) {
         return;
     }
 
@@ -740,10 +1111,12 @@ int main() {
         threads.emplace_back(PingWorker, i, cfg.timeoutMs, cfg.intervalMs);
     }
 
+    std::thread speedtestThread(SpeedtestWorker);
+
     while (!g_shouldExit) {
         ProcessConsoleInput(hInput);
         RenderDashboard();
-        Sleep(50);
+        Sleep(10);
     }
 
     FlushActiveOutages();
@@ -752,6 +1125,10 @@ int main() {
         if (th.joinable()) {
             th.join();
         }
+    }
+
+    if (speedtestThread.joinable()) {
+        speedtestThread.join();
     }
 
     SetConsoleMode(hInput, originalInputMode);

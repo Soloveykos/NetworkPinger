@@ -117,11 +117,11 @@ int GetEffectiveRainStepMs() {
 
     const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);
     if (worstSpeed >= 100.0) {
-        return 10;    // Швидкий дощ (зелена швидкість >= 100 Mbps)
+        return 40;    // Швидкий дощ (зелена швидкість >= 100 Mbps)
     } else if (worstSpeed >= 60.0) {
-        return 400;   // Помірна швидкість дощу (жовта швидкість 60..100 Mbps)
+        return 250;   // Помірна швидкість дощу (жовта швидкість 60..100 Mbps)
     } else {
-        return 1000;  // Дуже повільний дощ (червона швидкість < 60 Mbps)
+        return 500;   // Дуже повільний дощ (червона швидкість < 60 Mbps)
     }
 }
 
@@ -429,15 +429,16 @@ void SpeedtestWorker() {
         std::string exePath = FindSpeedtestExecutable();
         std::string outJson;
         std::string outErr;
-        bool procOk = RunSpeedtestProcess(exePath, outJson, outErr);
+        SpeedtestResult result;
+        const bool procOk = RunSpeedtestProcess(exePath, outJson, outErr);
+        const bool resultParsed = procOk && ParseSpeedtestJson(outJson, result);
 
         std::string timeNow = GetCurrentDateTimeStr();
-        SpeedtestResult result;
         result.timestampStr = timeNow;
         result.isRunning = false;
         result.hasRun = true;
 
-        if (procOk && ParseSpeedtestJson(outJson, result)) {
+        if (resultParsed) {
             result.success = true;
             lastRunSucceeded = true;
         } else {

@@ -82,6 +82,7 @@ struct SpeedtestResult {
     double downloadMbps = 0.0;
     double uploadMbps = 0.0;
     double pingMs = 0.0;
+    std::string progressText;
     std::string serverName;
     std::string isp;
     std::string timestampStr;
@@ -102,7 +103,7 @@ WORD GetSpeedColor(double mbps) {
     if (mbps < 60.0) {
         return COLOR_RED;
     }
-    if (mbps < 120.0) {
+    if (mbps < 100.0) {
         return COLOR_YELLOW;
     }
     return COLOR_GREEN;
@@ -115,10 +116,10 @@ int GetEffectiveRainStepMs() {
     }
 
     const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);
-    if (worstSpeed >= 120.0) {
-        return 10;    // Швидкий дощ (зелена швидкість >= 120 Mbps)
+    if (worstSpeed >= 100.0) {
+        return 10;    // Швидкий дощ (зелена швидкість >= 100 Mbps)
     } else if (worstSpeed >= 60.0) {
-        return 400;   // Помірна швидкість дощу (жовта швидкість 60..120 Mbps)
+        return 400;   // Помірна швидкість дощу (жовта швидкість 60..100 Mbps)
     } else {
         return 1000;  // Дуже повільний дощ (червона швидкість < 60 Mbps)
     }
@@ -160,6 +161,59 @@ std::string FindSpeedtestExecutable() {
         }
     }
     return "speedtest.exe";
+}
+
+static double ExtractJsonNumber(const std::string& json, size_t sectionStart, const std::string& key);
+
+void UpdateSpeedtestProgress(const std::string& line) {
+    const size_t typePos = line.find("\"type\":\"");
+    if (typePos == std::string::npos) {
+        return;
+    }
+
+    const size_t typeStart = typePos + 8;
+    const size_t typeEnd = line.find('"', typeStart);
+    if (typeEnd == std::string::npos) {
+        return;
+    }
+
+    const std::string type = line.substr(typeStart, typeEnd - typeStart);
+    const double progressValue = ExtractJsonNumber(line, 0, "\"progress\"");
+    std::string progress;
+    if (progressValue >= 0.0) {
+        const int percent = std::clamp(static_cast<int>(progressValue * 100.0 + 0.5), 0, 100);
+        const int filled = percent / 10;
+        progress = " [" + std::string(filled, '#') + std::string(10 - filled, '-') + "] " + std::to_string(percent) + "%";
+    }
+
+    std::string message;
+    if (type == "testStart") {
+        message = "Connecting to Ookla server...";
+    } else if (type == "ping") {
+        message = "Measuring latency...";
+    } else if (type == "download" || type == "upload") {
+        const double bandwidth = ExtractJsonNumber(line, 0, "\"bandwidth\"");
+        if (bandwidth >= 0.0) {
+            std::ostringstream speed;
+            speed << std::fixed << std::setprecision(2) << (bandwidth * 8.0) / 1000000.0;
+            message = (type == "download" ? "Download: " : "Upload: ") + speed.str() + " Mbps";
+        } else {
+            message = type == "download" ? "Download: measuring..." : "Upload: measuring...";
+        }
+    } else if (type == "testEnd") {
+        message = "Finishing measurement...";
+    }
+
+    if (!message.empty()) {
+        std::lock_guard<std::mutex> lock(g_speedtestMutex);
+        g_speedtest.progressText = message + progress;
+        const double bandwidth = ExtractJsonNumber(line, 0, "\"bandwidth\"");
+        if (bandwidth >= 0.0 && type == "download") {
+            g_speedtest.downloadMbps = (bandwidth * 8.0) / 1000000.0;
+        } else if (bandwidth >= 0.0 && type == "upload") {
+            g_speedtest.uploadMbps = (bandwidth * 8.0) / 1000000.0;
+        }
+    }
 }
 
 bool RunSpeedtestProcess(const std::string& exePath, std::string& outJson, std::string& outErr) {
@@ -214,11 +268,22 @@ bool RunSpeedtestProcess(const std::string& exePath, std::string& outJson, std::
     }
 
     std::string output;
+    std::string pendingLine;
     char buffer[1024];
     DWORD bytesRead = 0;
     while (ReadFile(hChildStdOutRead, buffer, sizeof(buffer) - 1, &bytesRead, NULL) && bytesRead > 0) {
         buffer[bytesRead] = '\0';
         output.append(buffer, bytesRead);
+        pendingLine.append(buffer, bytesRead);
+        size_t newlinePos = 0;
+        while ((newlinePos = pendingLine.find('\n')) != std::string::npos) {
+            UpdateSpeedtestProgress(pendingLine.substr(0, newlinePos));
+            pendingLine.erase(0, newlinePos + 1);
+        }
+    }
+
+    if (!pendingLine.empty()) {
+        UpdateSpeedtestProgress(pendingLine);
     }
 
     CloseHandle(hChildStdOutRead);
@@ -269,9 +334,9 @@ static std::string ExtractJsonString(const std::string& json, size_t sectionStar
 }
 
 bool ParseSpeedtestJson(const std::string& jsonStr, SpeedtestResult& res) {
-    size_t dlPos = jsonStr.find("\"download\"");
-    size_t ulPos = jsonStr.find("\"upload\"");
-    size_t pingPos = jsonStr.find("\"ping\"");
+    size_t dlPos = jsonStr.rfind("\"download\"");
+    size_t ulPos = jsonStr.rfind("\"upload\"");
+    size_t pingPos = jsonStr.rfind("\"ping\"");
 
     if (dlPos == std::string::npos || ulPos == std::string::npos) {
         return false;
@@ -358,6 +423,7 @@ void SpeedtestWorker() {
         {
             std::lock_guard<std::mutex> lock(g_speedtestMutex);
             g_speedtest.isRunning = true;
+            g_speedtest.progressText = "Connecting to Ookla server...";
         }
 
         std::string exePath = FindSpeedtestExecutable();
@@ -754,17 +820,19 @@ void RenderDashboard() {
             printf(" Speedtest : ");
             if (g_speedtest.isRunning && !g_speedtest.hasRun) {
                 SetColor(COLOR_YELLOW);
-                printf("[TESTING...] Initial speed measurement in progress...");
+                printf("[TESTING...] %s", g_speedtest.progressText.empty() ? "Measurement in progress..." : g_speedtest.progressText.c_str());
                 SetColor(COLOR_DEFAULT);
             } else if (g_speedtest.isRunning && g_speedtest.hasRun) {
                 const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);
                 const WORD overallColor = GetSpeedColor(worstSpeed);
                 SetColor(overallColor);
-                printf("DL: %.2f Mbps | UL: %.2f Mbps", g_speedtest.downloadMbps, g_speedtest.uploadMbps);
+                if (g_speedtest.downloadMbps > 0.0 || g_speedtest.uploadMbps > 0.0) {
+                    printf("DL: %.2f Mbps | UL: %.2f Mbps", g_speedtest.downloadMbps, g_speedtest.uploadMbps);
+                }
                 SetColor(COLOR_DEFAULT);
                 printf(" | ");
                 SetColor(COLOR_YELLOW);
-                printf("[MEASURING NOW...]");
+                printf("[MEASURING] %s", g_speedtest.progressText.empty() ? "Measurement in progress..." : g_speedtest.progressText.c_str());
                 SetColor(COLOR_DEFAULT);
             } else if (g_speedtest.hasRun && g_speedtest.success) {
                 const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);

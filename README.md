@@ -7,7 +7,7 @@ Small Windows console monitor that pings multiple IPs and shows their live conne
 - Shows ONLINE / DROPPING... / OUTAGE! states
 - Logs outages to `network_outages.log`
 - Measures internet speed (Download/Upload/Ping via Ookla `speedtest.exe`) on startup and every full hour
-- Color-coded speed indicators: green (>= 120 Mbps), yellow (< 120 Mbps), red (< 60 Mbps)
+- Color-coded speed indicators: green (>= 100 Mbps), yellow (60..100 Mbps), red (< 60 Mbps)
 - Adaptive Matrix rain animation speed tied to internet speed: fast rain (10ms) for green, moderate (400ms) for yellow, very slow (1000ms) for red; defaults to 10ms if speedtest cannot run
 - Logs speed measurements to `speedtest.log`
 - Supports an individual alert threshold for each IP

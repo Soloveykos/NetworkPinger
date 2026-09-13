@@ -100,7 +100,7 @@ void LogOutageEvent(const std::string& ip, const std::string& alias, int duratio
 std::wstring Utf8ToWide(const std::string& text);
 
 WORD GetSpeedColor(double mbps) {
-    if (mbps < 60.0) {
+    if (mbps < 50.0) {
         return COLOR_RED;
     }
     if (mbps < 100.0) {
@@ -115,11 +115,11 @@ int GetEffectiveRainStepMs() {
         return 10;   // Якщо ще не виміряли або помилка виміру — тримаємо швидкий крок 10 ms
     }
 
-    const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);
-    if (worstSpeed >= 100.0) {
+    const double downloadSpeed = g_speedtest.downloadMbps;
+    if (downloadSpeed >= 100.0) {
         return 40;    // Швидкий дощ (зелена швидкість >= 100 Mbps)
-    } else if (worstSpeed >= 60.0) {
-        return 250;   // Помірна швидкість дощу (жовта швидкість 60..100 Mbps)
+    } else if (downloadSpeed >= 50.0) {
+        return 250;   // Помірна швидкість дощу (жовта швидкість 50..100 Mbps)
     } else {
         return 500;   // Дуже повільний дощ (червона швидкість < 60 Mbps)
     }
@@ -824,8 +824,7 @@ void RenderDashboard() {
                 printf("[TESTING...] %s", g_speedtest.progressText.empty() ? "Measurement in progress..." : g_speedtest.progressText.c_str());
                 SetColor(COLOR_DEFAULT);
             } else if (g_speedtest.isRunning && g_speedtest.hasRun) {
-                const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);
-                const WORD overallColor = GetSpeedColor(worstSpeed);
+                const WORD overallColor = GetSpeedColor(g_speedtest.downloadMbps);
                 SetColor(overallColor);
                 if (g_speedtest.downloadMbps > 0.0 || g_speedtest.uploadMbps > 0.0) {
                     printf("DL: %.2f Mbps | UL: %.2f Mbps", g_speedtest.downloadMbps, g_speedtest.uploadMbps);
@@ -836,8 +835,7 @@ void RenderDashboard() {
                 printf("[MEASURING] %s", g_speedtest.progressText.empty() ? "Measurement in progress..." : g_speedtest.progressText.c_str());
                 SetColor(COLOR_DEFAULT);
             } else if (g_speedtest.hasRun && g_speedtest.success) {
-                const double worstSpeed = std::min(g_speedtest.downloadMbps, g_speedtest.uploadMbps);
-                const WORD overallColor = GetSpeedColor(worstSpeed);
+                const WORD overallColor = GetSpeedColor(g_speedtest.downloadMbps);
                 SetColor(overallColor);
                 printf("DL: %.2f Mbps | UL: %.2f Mbps | Ping: %.1f ms",
                        g_speedtest.downloadMbps, g_speedtest.uploadMbps, g_speedtest.pingMs);

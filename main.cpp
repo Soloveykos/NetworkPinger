@@ -114,7 +114,7 @@ WORD GetSpeedColor(double mbps) {
 int GetEffectiveRainStepMs() {
     std::lock_guard<std::mutex> lock(g_speedtestMutex);
     if (!g_speedtest.hasRun || !g_speedtest.success) {
-        return 10;   // Якщо ще не виміряли або помилка виміру — тримаємо швидкий крок 10 ms
+        return g_rainStepMs;
     }
 
     const double downloadSpeed = g_speedtest.downloadMbps;

@@ -9,7 +9,7 @@ Small Windows console monitor that pings multiple IPs and shows their live conne
 - Measures internet speed (Download/Upload/Ping via Ookla `speedtest.exe`) every four hours at 00:00, 04:00, 08:00, 12:00, 16:00, and 20:00 when enabled
 - Uses Ookla automatic server selection
 - Color-coded speed indicators use Download: green (>= 100 Mbps), yellow (50..100 Mbps), red (< 50 Mbps)
-- Adaptive Matrix rain animation speed tied to internet speed: fast rain (40ms) for green, moderate (250ms) for yellow, slow (500ms) for red; defaults to 10ms if speedtest cannot run
+- Adaptive Matrix rain animation speed tied to internet speed: fast rain (40ms) for green, moderate (250ms) for yellow, slow (500ms) for red; uses the configured `rainStepMs` value until a successful speedtest result is available or when speedtest is disabled
 - Logs speed measurements to `speedtest.log`
 - Supports an individual alert threshold for each IP
 - Allows sound to be enabled or disabled per IP directly in the console
@@ -29,7 +29,7 @@ Meaning:
 - `timeoutMs` — ping timeout in milliseconds
 - `intervalMs` — delay between checks in milliseconds
 - add `matrix` to the first line to enable the animated Matrix display
-- `rainStepMs` — optional Matrix rain step duration in milliseconds (`100` by default); higher values slow the rain, lower values speed it up
+- `rainStepMs` — optional Matrix rain step duration in milliseconds (`100` by default, minimum `25`); higher values slow the rain, lower values speed it up
 - add `speedtest` to enable scheduled speed measurements; without it, speedtest is disabled
 - each next line is `IP thresholdSeconds [alias]`; the optional alias may contain spaces
 

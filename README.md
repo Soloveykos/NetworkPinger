@@ -6,7 +6,7 @@ Small Windows console monitor that pings multiple IPs and shows their live conne
 - Monitors several targets at once
 - Shows ONLINE / DROPPING... / OUTAGE! states
 - Logs outages to `network_outages.log`
-- Measures internet speed (Download/Upload/Ping via Ookla `speedtest.exe`) on startup and every full hour
+- Measures internet speed (Download/Upload/Ping via Ookla `speedtest.exe`) every four hours at 00:00, 04:00, 08:00, 12:00, 16:00, and 20:00 when enabled
 - Uses Ookla automatic server selection
 - Color-coded speed indicators use Download: green (>= 100 Mbps), yellow (50..100 Mbps), red (< 50 Mbps)
 - Adaptive Matrix rain animation speed tied to internet speed: fast rain (40ms) for green, moderate (250ms) for yellow, slow (500ms) for red; defaults to 10ms if speedtest cannot run
@@ -19,7 +19,7 @@ Small Windows console monitor that pings multiple IPs and shows their live conne
 `appsettings.txt` format:
 
 ```txt
-<timeoutMs> <intervalMs> [matrix] [rainStepMs]
+<timeoutMs> <intervalMs> [matrix] [rainStepMs] [speedtest]
 <ip1> <alertSeconds> [alias]
 <ip2> <alertSeconds> [alias]
 <ip3> <alertSeconds> [alias]
@@ -30,6 +30,7 @@ Meaning:
 - `intervalMs` — delay between checks in milliseconds
 - add `matrix` to the first line to enable the animated Matrix display
 - `rainStepMs` — optional Matrix rain step duration in milliseconds (`100` by default); higher values slow the rain, lower values speed it up
+- add `speedtest` to enable scheduled speed measurements; without it, speedtest is disabled
 - each next line is `IP thresholdSeconds [alias]`; the optional alias may contain spaces
 
 The Matrix rain alphabet is defined in `kDefaultMatrixAlphabet` in `main.cpp`. Edit that constant and rebuild the program to change it.
@@ -37,7 +38,7 @@ The Matrix rain alphabet is defined in `kDefaultMatrixAlphabet` in `main.cpp`. E
 Example:
 
 ```txt
-1000 1000 matrix 100
+1000 1000 matrix 100 speedtest
 8.8.8.8 3 Google DNS
 1.1.1.1 60 Cloudflare DNS
 9.9.9.9 30 Quad9 DNS

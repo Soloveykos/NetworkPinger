@@ -62,6 +62,7 @@ struct Config {
     int intervalMs = 1000;
     int defaultThresholdSec = 30;
     bool matrixEnabled = false;
+    bool speedtestEnabled = false;
     int rainStepMs = 100;
     std::vector<TargetConfig> targets;
 };
@@ -72,6 +73,7 @@ std::mutex g_logMutex;
 std::atomic<bool> g_shouldExit{false};
 std::vector<TargetState> g_targets;
 bool g_matrixEnabled = false;
+bool g_speedtestEnabled = false;
 int g_rainStepMs = 100;
 std::wstring g_matrixGlyphs;
 
@@ -384,41 +386,28 @@ bool ParseSpeedtestJson(const std::string& jsonStr, SpeedtestResult& res) {
     return true;
 }
 
-void SpeedtestWorker() {
-    bool isFirstRun = true;
-    bool lastRunSucceeded = false;
+void SpeedtestWorker(bool enabled) {
+    if (!enabled) {
+        return;
+    }
 
     while (!g_shouldExit) {
-        if (!isFirstRun) {
-            auto now = std::chrono::system_clock::now();
-            auto nowTimeT = std::chrono::system_clock::to_time_t(now);
-            std::tm localTm = *std::localtime(&nowTimeT);
+        auto now = std::chrono::system_clock::now();
+        auto nowTimeT = std::chrono::system_clock::to_time_t(now);
+        std::tm localTm = *std::localtime(&nowTimeT);
+        localTm.tm_min = 0;
+        localTm.tm_sec = 0;
+        localTm.tm_hour = ((localTm.tm_hour / 4) + 1) * 4;
+        const std::time_t nextRunTimeT = std::mktime(&localTm);
+        const auto nextRunPoint = std::chrono::system_clock::from_time_t(nextRunTimeT);
 
-            // Schedule for next full hour (:00:00)
-            localTm.tm_min = 0;
-            localTm.tm_sec = 0;
-            localTm.tm_hour += 1;
-            std::time_t nextHourTimeT = std::mktime(&localTm);
-            auto nextWakePoint = std::chrono::system_clock::from_time_t(nextHourTimeT);
-
-            // If last attempt failed, retry after 60 seconds instead of waiting full hour
-            if (!lastRunSucceeded) {
-                auto retryPoint = now + std::chrono::seconds(60);
-                if (retryPoint < nextWakePoint) {
-                    nextWakePoint = retryPoint;
-                }
-            }
-
-            while (!g_shouldExit && std::chrono::system_clock::now() < nextWakePoint) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            }
-
-            if (g_shouldExit) {
-                break;
-            }
+        while (!g_shouldExit && std::chrono::system_clock::now() < nextRunPoint) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
         }
 
-        isFirstRun = false;
+        if (g_shouldExit) {
+            break;
+        }
 
         {
             std::lock_guard<std::mutex> lock(g_speedtestMutex);
@@ -440,10 +429,8 @@ void SpeedtestWorker() {
 
         if (resultParsed) {
             result.success = true;
-            lastRunSucceeded = true;
         } else {
             result.success = false;
-            lastRunSucceeded = false;
             if (!outErr.empty()) {
                 result.errorMessage = outErr;
             } else {
@@ -535,12 +522,17 @@ Config LoadConfig() {
             if (first >> timeout >> interval) {
                 cfg.timeoutMs = timeout;
                 cfg.intervalMs = interval;
-                std::string mode;
-                if (first >> mode && mode == "matrix") {
-                    cfg.matrixEnabled = true;
-                    int rainStepMs = 0;
-                    if (first >> rainStepMs) {
-                        cfg.rainStepMs = std::clamp(rainStepMs, 25, 1000);
+                std::string option;
+                while (first >> option) {
+                    if (option == "matrix") {
+                        cfg.matrixEnabled = true;
+                    } else if (option == "speedtest") {
+                        cfg.speedtestEnabled = true;
+                    } else if (!option.empty() &&
+                               std::all_of(option.begin(), option.end(), [](unsigned char character) {
+                                   return std::isdigit(character) != 0;
+                               })) {
+                        cfg.rainStepMs = std::clamp(std::stoi(option), 25, 1000);
                     }
                 }
             }
@@ -856,7 +848,11 @@ void RenderDashboard() {
                 }
                 SetColor(COLOR_DEFAULT);
             } else {
-                printf("Waiting for initial measurement...");
+                if (!g_speedtestEnabled) {
+                    printf("Disabled in configuration");
+                } else {
+                    printf("Waiting for scheduled measurement...");
+                }
             }
             printf("\n");
         }
@@ -1163,6 +1159,7 @@ int main() {
 
     Config cfg = LoadConfig();
     g_matrixEnabled = cfg.matrixEnabled;
+    g_speedtestEnabled = cfg.speedtestEnabled;
     g_rainStepMs = cfg.rainStepMs;
     g_matrixGlyphs = Utf8ToWide(kDefaultMatrixAlphabet);
     for (size_t i = 0; i < cfg.targets.size(); ++i) {
@@ -1178,7 +1175,7 @@ int main() {
         threads.emplace_back(PingWorker, i, cfg.timeoutMs, cfg.intervalMs);
     }
 
-    std::thread speedtestThread(SpeedtestWorker);
+    std::thread speedtestThread(SpeedtestWorker, cfg.speedtestEnabled);
 
     while (!g_shouldExit) {
         ProcessConsoleInput(hInput);

@@ -60,3 +60,27 @@ The `PATH` update is needed so the compiler can find its assembler and other bui
 `NetworkPinger.ico` is embedded into `NetworkPinger.exe` during this build. To adjust the green digital-rain icon, edit and run `tools\create-icon.ps1` before rebuilding.
 
 Then run `NetworkPinger.exe` in the same folder as `appsettings.txt`.
+
+## If Windows blocks the application
+
+If Windows shows a message that Smart App Control or Microsoft Defender blocked `NetworkPinger.exe`, open:
+
+```text
+Windows Security
+	-> App & browser control
+	-> Smart App Control settings
+	-> Off
+```
+
+On Ukrainian Windows:
+
+```text
+Безпека Windows
+	-> Керування програмами та браузерами
+	-> Параметри інтелектуального керування програмами
+	-> Вимкнуто
+```
+
+The `Check apps and files` switch under reputation-based protection may be disabled because Smart App Control controls it. Disable Smart App Control itself instead of that switch.
+
+This setting reduces Windows protection and may not be possible to turn on again with a simple switch without resetting or reinstalling Windows. For local development, prefer signing the executable and changing this setting only when necessary.

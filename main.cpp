@@ -807,8 +807,8 @@ void RenderDashboard() {
         SetColor(COLOR_DEFAULT);
         printf("=======================================================================\n");
         printf(" Click [ON ]/[OFF] for sound, or press Ctrl+C to stop monitor.\n");
-        printf("-----------------------------------------------------------------------\n");
-        {
+        if (g_speedtestEnabled) {
+            printf("-----------------------------------------------------------------------\n");
             std::lock_guard<std::mutex> lock(g_speedtestMutex);
             printf(" Speedtest : ");
             if (g_speedtest.isRunning && !g_speedtest.hasRun) {
@@ -848,15 +848,11 @@ void RenderDashboard() {
                 }
                 SetColor(COLOR_DEFAULT);
             } else {
-                if (!g_speedtestEnabled) {
-                    printf("Disabled in configuration");
-                } else {
-                    printf("Waiting for scheduled measurement...");
-                }
+                printf("Waiting for scheduled measurement...");
             }
             printf("\n");
+            printf("=======================================================================\n");
         }
-        printf("=======================================================================\n");
     }
 
     if (!g_matrixEnabled) {
@@ -874,7 +870,7 @@ void RenderDashboard() {
     }
 
     const int matrixWidth = std::min(consoleWidth, kDashboardWidth);
-    const int tableHeight = static_cast<int>(g_targets.size()) + 10;
+    const int tableHeight = static_cast<int>(g_targets.size()) + (g_speedtestEnabled ? 10 : 7);
     const int matrixHeight = std::max(1, consoleHeight - tableHeight);
     const int glyphRows = matrixHeight - 1;
     const int maxRainLength = std::max(6, std::min(24, glyphRows * 2 / 3));
